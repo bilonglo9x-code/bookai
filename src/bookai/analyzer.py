@@ -38,6 +38,7 @@ def analyze_chunks(
     api_key: str | None = None,
     model: str = "gpt-4o-mini",
     provider: str = "openai",
+    base_url: str | None = None,
 ) -> list[AnalyzedChunk]:
     """Analyze a list of chunks using LLM.
 
@@ -45,7 +46,8 @@ def analyze_chunks(
         chunks: List of text chunks to analyze.
         api_key: API key for LLM provider. Falls back to env vars.
         model: Model name to use.
-        provider: LLM provider ("openai", "anthropic", or "mock").
+        provider: LLM provider ("openai", "anthropic", "custom", or "mock").
+        base_url: Custom API base URL (for OpenAI-compatible endpoints).
 
     Returns:
         List of AnalyzedChunk with labels and scores.
@@ -63,7 +65,9 @@ def analyze_chunks(
 
     results: list[AnalyzedChunk] = []
     for chunk in chunks:
-        analyzed = _analyze_single(chunk, api_key=api_key, model=model, provider=provider)
+        analyzed = _analyze_single(
+            chunk, api_key=api_key, model=model, provider=provider, base_url=base_url
+        )
         results.append(analyzed)
 
     return results
@@ -75,6 +79,7 @@ def analyze_chunks_batch(
     model: str = "gpt-4o-mini",
     provider: str = "openai",
     batch_size: int = 5,
+    base_url: str | None = None,
 ) -> list[AnalyzedChunk]:
     """Analyze chunks in batches for efficiency.
 
@@ -93,7 +98,9 @@ def analyze_chunks_batch(
     results: list[AnalyzedChunk] = []
     for i in range(0, len(chunks), batch_size):
         batch = chunks[i : i + batch_size]
-        batch_results = _analyze_batch(batch, api_key=api_key, model=model, provider=provider)
+        batch_results = _analyze_batch(
+            batch, api_key=api_key, model=model, provider=provider, base_url=base_url
+        )
         results.extend(batch_results)
 
     return results
@@ -104,12 +111,13 @@ def _analyze_single(
     api_key: str,
     model: str,
     provider: str,
+    base_url: str | None = None,
 ) -> AnalyzedChunk:
     """Analyze a single chunk via LLM API."""
     prompt = ANALYSIS_PROMPT.format(text=chunk.text[:2000])
 
-    if provider == "openai":
-        response_text = _call_openai(prompt, api_key=api_key, model=model)
+    if provider in ("openai", "custom"):
+        response_text = _call_openai(prompt, api_key=api_key, model=model, base_url=base_url)
     elif provider == "anthropic":
         response_text = _call_anthropic(prompt, api_key=api_key, model=model)
     else:
@@ -123,6 +131,7 @@ def _analyze_batch(
     api_key: str,
     model: str,
     provider: str,
+    base_url: str | None = None,
 ) -> list[AnalyzedChunk]:
     """Analyze a batch of chunks in one API call."""
     batch_prompt = (
@@ -140,8 +149,8 @@ def _analyze_batch(
         "Trả về JSON array, không giải thích thêm."
     )
 
-    if provider == "openai":
-        response_text = _call_openai(batch_prompt, api_key=api_key, model=model)
+    if provider in ("openai", "custom"):
+        response_text = _call_openai(batch_prompt, api_key=api_key, model=model, base_url=base_url)
     elif provider == "anthropic":
         response_text = _call_anthropic(batch_prompt, api_key=api_key, model=model)
     else:
@@ -162,6 +171,7 @@ def _analyze_batch(
         # Fallback: analyze individually
         return [_mock_analyze(chunk) for chunk in chunks]
 
+    valid_values = {lbl.value for lbl in ChunkLabel}
     results: list[AnalyzedChunk] = []
     for i, chunk in enumerate(chunks):
         if i < len(data):
@@ -169,7 +179,7 @@ def _analyze_batch(
             labels = [
                 ChunkLabel(lbl)
                 for lbl in item.get("labels", [])
-                if lbl in ChunkLabel.__members__
+                if lbl in valid_values
             ]
             results.append(
                 AnalyzedChunk(
@@ -186,12 +196,18 @@ def _analyze_batch(
     return results
 
 
-def _call_openai(prompt: str, api_key: str, model: str) -> str:
-    """Call OpenAI API."""
+def _call_openai(
+    prompt: str, api_key: str, model: str, base_url: str | None = None
+) -> str:
+    """Call OpenAI-compatible API."""
     import httpx
 
+    url = base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    if not url.endswith("/chat/completions"):
+        url = url.rstrip("/") + "/chat/completions"
+
     response = httpx.post(
-        "https://api.openai.com/v1/chat/completions",
+        url,
         headers={"Authorization": f"Bearer {api_key}"},
         json={
             "model": model,
@@ -199,7 +215,7 @@ def _call_openai(prompt: str, api_key: str, model: str) -> str:
             "temperature": 0.3,
             "max_tokens": 1000,
         },
-        timeout=60.0,
+        timeout=120.0,
     )
     response.raise_for_status()
     data = response.json()
@@ -312,8 +328,8 @@ def _mock_analyze(chunk: Chunk) -> AnalyzedChunk:
 
 def _get_api_key(provider: str) -> str | None:
     """Get API key from environment."""
-    if provider == "openai":
-        return os.environ.get("OPENAI_API_KEY")
+    if provider in ("openai", "custom"):
+        return os.environ.get("OPENAI_API_KEY") or os.environ.get("API_KEY")
     elif provider == "anthropic":
         return os.environ.get("ANTHROPIC_API_KEY")
     return None

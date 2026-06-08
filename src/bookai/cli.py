@@ -28,9 +28,14 @@ def process(
     output: str | None = typer.Option(None, "-o", "--output", help="Output JSON file path"),
     max_chunks: int = typer.Option(100, "--max-chunks", help="Max chunks to analyze"),
     max_tokens: int = typer.Option(500, "--max-tokens", help="Max tokens per chunk"),
-    provider: str = typer.Option("mock", "--provider", help="AI provider: openai, anthropic, mock"),
+    provider: str = typer.Option(
+        "mock", "--provider", help="AI provider: openai, anthropic, custom, mock"
+    ),
     model: str = typer.Option("gpt-4o-mini", "--model", help="Model name for AI provider"),
     api_key: str | None = typer.Option(None, "--api-key", help="API key (or use env var)"),
+    base_url: str | None = typer.Option(
+        None, "--base-url", help="Custom API base URL (OpenAI-compatible)"
+    ),
     top_n: int = typer.Option(10, "--top", help="Show top N results"),
     batch: bool = typer.Option(False, "--batch", help="Use batch analysis (faster, less accurate)"),
 ) -> None:
@@ -74,11 +79,19 @@ def process(
     try:
         if batch and provider != "mock":
             analyzed = analyze_chunks_batch(
-                chunks_to_analyze, api_key=api_key, model=model, provider=provider
+                chunks_to_analyze,
+                api_key=api_key,
+                model=model,
+                provider=provider,
+                base_url=base_url,
             )
         else:
             analyzed = analyze_chunks(
-                chunks_to_analyze, api_key=api_key, model=model, provider=provider
+                chunks_to_analyze,
+                api_key=api_key,
+                model=model,
+                provider=provider,
+                base_url=base_url,
             )
     except Exception as e:
         console.print(f"[red]Error during analysis: {e}[/red]")
