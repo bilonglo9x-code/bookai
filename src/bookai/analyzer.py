@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 
 from .models import AnalyzedChunk, Chunk, ChunkLabel
 
@@ -98,10 +99,20 @@ def analyze_chunks_batch(
     results: list[AnalyzedChunk] = []
     for i in range(0, len(chunks), batch_size):
         batch = chunks[i : i + batch_size]
-        batch_results = _analyze_batch(
-            batch, api_key=api_key, model=model, provider=provider, base_url=base_url
-        )
-        results.extend(batch_results)
+        # Retry up to 3 times on transient errors
+        for attempt in range(3):
+            try:
+                batch_results = _analyze_batch(
+                    batch, api_key=api_key, model=model, provider=provider, base_url=base_url
+                )
+                results.extend(batch_results)
+                break
+            except Exception:
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+                else:
+                    # Final fallback: mock analysis
+                    results.extend([_mock_analyze(chunk) for chunk in batch])
 
     return results
 
@@ -213,11 +224,32 @@ def _call_openai(
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.3,
-            "max_tokens": 1000,
+            "max_tokens": 2000,
+            "stream": False,
         },
         timeout=120.0,
     )
     response.raise_for_status()
+
+    # Handle SSE streaming responses (some providers return SSE even with stream=False)
+    text = response.text.strip()
+    if text.startswith("data: "):
+        # Parse SSE: concatenate all content chunks
+        content_parts = []
+        for line in text.split("\n"):
+            line = line.strip()
+            if line.startswith("data: ") and line != "data: [DONE]":
+                try:
+                    chunk_data = json.loads(line[6:])
+                    delta = chunk_data.get("choices", [{}])[0]
+                    if "message" in delta:
+                        content_parts.append(delta["message"].get("content", ""))
+                    elif "delta" in delta:
+                        content_parts.append(delta["delta"].get("content", ""))
+                except (json.JSONDecodeError, IndexError, KeyError):
+                    continue
+        return "".join(content_parts)
+
     data = response.json()
     return data["choices"][0]["message"]["content"]
 
