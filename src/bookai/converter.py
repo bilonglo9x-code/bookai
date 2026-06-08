@@ -67,7 +67,7 @@ def convert_pdf(file_path: str) -> tuple[BookMetadata, str]:
     chapter_count = 0
 
     for page in doc:
-        text = page.get_text("text")
+        text = _extract_pdf_page_text(page)
         if not text.strip():
             continue
 
@@ -89,12 +89,13 @@ def convert_pdf(file_path: str) -> tuple[BookMetadata, str]:
     # If no chapters detected, treat each page as a section
     if not chapters:
         for page in doc:
-            text = page.get_text("text").strip()
+            text = _extract_pdf_page_text(page)
             if text:
                 chapters.append(text)
         chapter_count = len(chapters)
 
     markdown = "\n\n---\n\n".join(chapters)
+    markdown = _clean_pdf_artifacts(markdown)
     doc.close()
 
     metadata = BookMetadata(
@@ -175,6 +176,95 @@ def _html_to_markdown(html: str) -> str:
     # Clean up excessive whitespace
     md = re.sub(r"\n{3,}", "\n\n", md)
     return md.strip()
+
+
+def _clean_pdf_artifacts(text: str) -> str:
+    """Remove common PDF artifacts: watermarks, page numbers, repeated URLs."""
+    # Remove watermark URLs that appear on every page (e.g., thuviensach.vn)
+    lines = text.split("\n")
+    # Count URL-like lines to detect watermarks (appear on >30% of pages)
+    from collections import Counter
+
+    url_counts = Counter()
+    for line in lines:
+        stripped = line.strip()
+        if re.match(r"^https?://\S+$", stripped):
+            url_counts[stripped] += 1
+
+    watermarks = {url for url, count in url_counts.items() if count > 5}
+
+    if watermarks:
+        lines = [line for line in lines if line.strip() not in watermarks]
+
+    # Remove standalone page number lines (e.g., "34 -", "- 39", "34 - Book Title")
+    lines = [
+        line for line in lines
+        if not re.match(r"^\s*-?\s*\d{1,4}\s*-?\s*$", line)
+        and not re.match(r"^\s*\d{1,4}\s*-\s*.{1,40}\s*$", line)
+        and not re.match(r"^\s*.{1,40}\s*-\s*\d{1,4}\s*$", line)
+    ]
+
+    result = "\n".join(lines)
+    # Clean up excessive blank lines left after removal
+    result = re.sub(r"\n{3,}", "\n\n", result)
+    return result
+
+
+def _fix_vietnamese_pdf_text(text: str) -> str:
+    """Fix broken Vietnamese 'đ' character in PDF text extraction.
+
+    Many Vietnamese PDFs use fonts that map 'đ' (d-stroke) to control
+    characters like \\x05. This function detects and fixes those mappings.
+    """
+    if not text:
+        return text
+
+    # Common pattern: \x05 is used for lowercase 'đ' in broken Vietnamese PDF fonts
+    text = text.replace("\x05", "đ")
+
+    # Remove form feed characters (page breaks)
+    text = text.replace("\x0c", "")
+
+    # Fix other potential control character mappings
+    text = re.sub(r"[\x00-\x04\x06-\x08\x0e-\x1f]", "", text)
+
+    return text
+
+
+def _extract_pdf_page_text(page: object) -> str:
+    """Extract text from PDF page using dict mode to fix broken Vietnamese fonts.
+
+    In many Vietnamese PDFs, the 'đ/Đ' character is mapped to a newline (\\n)
+    within font spans. Dict-mode extraction lets us detect these: real line breaks
+    separate 'lines' objects, while \\n inside a span's text is a broken character.
+    """
+    import pymupdf  # noqa: F811
+
+    if not isinstance(page, pymupdf.Page):
+        return ""
+
+    page_dict = page.get_text("dict")
+    lines_out: list[str] = []
+
+    for block in page_dict.get("blocks", []):
+        if "lines" not in block:
+            continue
+        for line in block["lines"]:
+            line_text = ""
+            for span in line["spans"]:
+                text = span["text"]
+                # \n within a span = broken đ/Đ in Vietnamese PDF fonts
+                text = text.replace("\n", "đ")
+                # Also fix \x05 mapping
+                text = text.replace("\x05", "đ")
+                line_text += text
+            if line_text.strip():
+                lines_out.append(line_text.strip())
+
+    result = "\n".join(lines_out)
+    # Remove form feed and other control chars
+    result = re.sub(r"[\x00-\x08\x0e-\x1f]", "", result)
+    return result
 
 
 def _is_chapter_heading(line: str) -> bool:
