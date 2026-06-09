@@ -9,6 +9,14 @@ import pytest
 
 from bookai.analyzer import _mock_analyze, analyze_chunks
 from bookai.chunker import _split_chapters, _split_sentences, chunk_markdown
+from bookai.content_studio import (
+    ContentPack,
+    generate_all,
+    generate_captions,
+    generate_listicles,
+    generate_quote_cards,
+    generate_radio_scripts,
+)
 from bookai.converter import convert_file, convert_text
 from bookai.models import (
     AnalyzedChunk,
@@ -246,3 +254,158 @@ Khi ai đó cười với bạn nhưng mắt không cười, đó là dấu hi�
             top = result.get_top_content(3)
             assert len(top) <= 3
             assert top[0].viral_score >= top[-1].viral_score
+
+
+# --- Content Studio tests ---
+
+
+def _make_analyzed_chunks() -> tuple[list[AnalyzedChunk], BookMetadata]:
+    """Helper to create test data for content studio."""
+    metadata = BookMetadata(title="Nhìn Thấu Lòng Người", author="Tác giả mẫu")
+    analyzed = [
+        AnalyzedChunk(
+            chunk=Chunk(text=(
+                "Muốn biết một người đàn ông ra sao, hãy nhìn vào đôi giày anh ta đi. "
+                "Đôi giày sạch sẽ cho thấy anh ta cẩn thận và chăm chút bản thân."
+            )),
+            labels=[ChunkLabel.QUOTE, ChunkLabel.INSIGHT],
+            viral_score=9.0,
+            summary="Đôi giày phản ánh tính cách con người.",
+            reason="Curiosity cao, actionable.",
+        ),
+        AnalyzedChunk(
+            chunk=Chunk(text=(
+                "Có một câu chuyện kể rằng ngày xưa có một vị vua rất thông minh. "
+                "Vua hỏi quần thần ai là kẻ nguy hiểm nhất. Mọi người đều chỉ ra ngoài, "
+                "nhưng vua chỉ vào gương. Bài học: kẻ thù lớn nhất là chính bản thân ta."
+            )),
+            labels=[ChunkLabel.STORY, ChunkLabel.INSIGHT, ChunkLabel.HOOK],
+            viral_score=8.5,
+            summary="Câu chuyện vua và gương: kẻ thù lớn nhất là chính mình.",
+            reason="Story mạnh, emotion tốt.",
+        ),
+        AnalyzedChunk(
+            chunk=Chunk(text=(
+                "Nguyên tắc 1: Đừng bao giờ tin hoàn toàn vào lời nói. "
+                "Nguyên tắc 2: Quan sát hành động ít nhất 3 tháng. "
+                "Nguyên tắc 3: Nhìn cách họ đối xử với người phục vụ."
+            )),
+            labels=[ChunkLabel.TIP, ChunkLabel.INSIGHT],
+            viral_score=7.5,
+            summary="3 nguyên tắc nhìn thấu lòng người.",
+            reason="Actionable cao, liệt kê rõ ràng.",
+        ),
+        AnalyzedChunk(
+            chunk=Chunk(text=(
+                "Người thành công thường dậy sớm và đọc sách mỗi ngày. "
+                "Đây là thói quen đơn giản nhưng ít người thực hiện được."
+            )),
+            labels=[ChunkLabel.TIP, ChunkLabel.CONTROVERSIAL],
+            viral_score=6.0,
+            summary="Thói quen dậy sớm và đọc sách.",
+        ),
+        AnalyzedChunk(
+            chunk=Chunk(text=(
+                "Bạn có biết sự thật ít ai biết về tâm lý con người? "
+                "Khi ai đó cười với bạn nhưng mắt không cười, đó là dấu hiệu nguy hiểm."
+            )),
+            labels=[ChunkLabel.HOOK, ChunkLabel.CONTROVERSIAL],
+            viral_score=8.0,
+            summary="Dấu hiệu cười giả qua ánh mắt.",
+        ),
+    ]
+    return analyzed, metadata
+
+
+class TestContentStudio:
+    def test_generate_radio_scripts(self):
+        analyzed, metadata = _make_analyzed_chunks()
+        scripts = generate_radio_scripts(analyzed, metadata, max_scripts=3, min_score=6.0)
+        assert len(scripts) >= 1
+        assert scripts[0].hook
+        assert scripts[0].body
+        assert scripts[0].cta
+        assert "Nhìn Thấu Lòng Người" in scripts[0].cta
+        assert scripts[0].estimated_seconds > 0
+        assert len(scripts[0].hashtags) >= 3
+
+    def test_generate_quote_cards(self):
+        analyzed, metadata = _make_analyzed_chunks()
+        cards = generate_quote_cards(analyzed, metadata, max_cards=5, min_score=5.0)
+        assert len(cards) >= 1
+        assert cards[0].quote_text
+        assert cards[0].book_title == "Nhìn Thấu Lòng Người"
+        assert cards[0].author == "Tác giả mẫu"
+        assert len(cards[0].hashtags) >= 3
+
+    def test_generate_listicles(self):
+        analyzed, metadata = _make_analyzed_chunks()
+        listicles = generate_listicles(
+            analyzed, metadata, max_listicles=3, items_per_list=3, min_score=5.0,
+        )
+        assert len(listicles) >= 1
+        assert len(listicles[0].items) >= 2
+        assert "Nhìn Thấu Lòng Người" in listicles[0].title
+
+    def test_generate_captions_tiktok(self):
+        analyzed, metadata = _make_analyzed_chunks()
+        captions = generate_captions(
+            analyzed, metadata, max_captions=5, platform="tiktok", min_score=6.0,
+        )
+        assert len(captions) >= 1
+        assert "giỏ hàng" in captions[0].text
+        assert captions[0].platform == "tiktok"
+        assert "#" in captions[0].text  # has hashtags
+
+    def test_generate_captions_instagram(self):
+        analyzed, metadata = _make_analyzed_chunks()
+        captions = generate_captions(
+            analyzed, metadata, max_captions=3, platform="instagram", min_score=6.0,
+        )
+        assert len(captions) >= 1
+        assert "Save lại" in captions[0].text
+        assert captions[0].platform == "instagram"
+
+    def test_generate_all(self):
+        analyzed, metadata = _make_analyzed_chunks()
+        pack = generate_all(analyzed, metadata)
+        assert isinstance(pack, ContentPack)
+        assert pack.total_pieces > 0
+        assert pack.book_title == "Nhìn Thấu Lòng Người"
+
+    def test_content_pack_model_dump(self):
+        analyzed, metadata = _make_analyzed_chunks()
+        pack = generate_all(analyzed, metadata)
+        data = pack.model_dump()
+        assert "radio_scripts" in data
+        assert "quote_cards" in data
+        assert "listicles" in data
+        assert "captions" in data
+        assert data["total_pieces"] == pack.total_pieces
+
+    def test_radio_script_full_script(self):
+        analyzed, metadata = _make_analyzed_chunks()
+        scripts = generate_radio_scripts(analyzed, metadata, max_scripts=1)
+        if scripts:
+            script = scripts[0]
+            assert script.hook in script.full_script
+            assert script.cta in script.full_script
+
+    def test_empty_analyzed_returns_empty(self):
+        metadata = BookMetadata(title="Empty Book")
+        pack = generate_all([], metadata)
+        assert pack.total_pieces == 0
+        assert pack.radio_scripts == []
+        assert pack.quote_cards == []
+
+    def test_low_score_chunks_filtered(self):
+        metadata = BookMetadata(title="Test")
+        analyzed = [
+            AnalyzedChunk(
+                chunk=Chunk(text="Low quality content"),
+                labels=[ChunkLabel.SUMMARY],
+                viral_score=1.0,
+            ),
+        ]
+        scripts = generate_radio_scripts(analyzed, metadata, min_score=6.0)
+        assert scripts == []

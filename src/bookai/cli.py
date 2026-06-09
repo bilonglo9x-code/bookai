@@ -12,6 +12,7 @@ from rich.table import Table
 
 from .analyzer import analyze_chunks, analyze_chunks_batch
 from .chunker import chunk_markdown
+from .content_studio import generate_all
 from .converter import convert_file
 from .models import BookResult, ChunkLabel
 
@@ -179,6 +180,107 @@ def chunks(
         )
 
     console.print(table)
+
+
+@app.command()
+def generate(
+    input_json: str = typer.Argument(help="Path to analysis result JSON (from `process -o`)"),
+    output: str | None = typer.Option(None, "-o", "--output", help="Output JSON file path"),
+    format: str = typer.Option(
+        "all", "--format", help="Content type: all, radio, quote, listicle, caption"
+    ),
+) -> None:
+    """Generate ready-to-post content from analysis results.
+
+    Takes the JSON output of `bookai process -o results.json` and generates
+    radio scripts, quote cards, listicles, and captions.
+
+    Examples:
+        bookai generate results.json -o content.json
+        bookai generate results.json --format radio
+    """
+    path = Path(input_json)
+    if not path.exists():
+        console.print(f"[red]Error: File not found: {input_json}[/red]")
+        raise typer.Exit(1)
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    result = BookResult(**data)
+
+    if not result.analyzed:
+        console.print("[red]No analyzed chunks found in input. Run `process` first.[/red]")
+        raise typer.Exit(1)
+
+    console.print(
+        f"\n[bold blue]🎬 Generating content:[/bold blue] "
+        f"{result.metadata.title} ({len(result.analyzed)} chunks)"
+    )
+
+    pack = generate_all(result.analyzed, result.metadata)
+
+    # Display summary
+    console.print(f"\n[bold green]Total content pieces: {pack.total_pieces}[/bold green]\n")
+
+    # Radio scripts
+    if pack.radio_scripts and format in ("all", "radio"):
+        console.print(f"[bold]🎙️ Radio Scripts ({len(pack.radio_scripts)}):[/bold]\n")
+        for i, script in enumerate(pack.radio_scripts, 1):
+            console.print(Panel(
+                f"[bold cyan]HOOK:[/bold cyan] {script.hook}\n\n"
+                f"[bold]BODY:[/bold] {script.body[:300]}"
+                f"{'...' if len(script.body) > 300 else ''}\n\n"
+                f"[bold yellow]CTA:[/bold yellow] {script.cta}\n\n"
+                f"[dim]~{script.estimated_seconds}s | "
+                f"{'  '.join('#' + t for t in script.hashtags)}[/dim]",
+                title=f"Script #{i}",
+                border_style="cyan",
+            ))
+
+    # Quote cards
+    if pack.quote_cards and format in ("all", "quote"):
+        console.print(f"\n[bold]📸 Quote Cards ({len(pack.quote_cards)}):[/bold]\n")
+        table = Table()
+        table.add_column("#", width=3)
+        table.add_column("Quote", max_width=60)
+        table.add_column("Caption preview", max_width=40)
+        for i, card in enumerate(pack.quote_cards[:10], 1):
+            table.add_row(
+                str(i),
+                card.quote_text[:80] + "..." if len(card.quote_text) > 80 else card.quote_text,
+                card.caption[:50] + "...",
+            )
+        console.print(table)
+
+    # Listicles
+    if pack.listicles and format in ("all", "listicle"):
+        console.print(f"\n[bold]📋 Listicles ({len(pack.listicles)}):[/bold]\n")
+        for ls in pack.listicles:
+            console.print(Panel(
+                f"[bold]{ls.intro}[/bold]\n\n"
+                + "\n".join(ls.items)
+                + f"\n\n[yellow]{ls.cta}[/yellow]",
+                title=ls.title,
+                border_style="green",
+            ))
+
+    # Captions
+    if pack.captions and format in ("all", "caption"):
+        console.print(f"\n[bold]💬 Captions ({len(pack.captions)}):[/bold]\n")
+        for i, cap in enumerate(pack.captions[:5], 1):
+            console.print(Panel(
+                cap.text,
+                title=f"Caption #{i} ({cap.platform})",
+                border_style="magenta",
+            ))
+
+    # Save output
+    if output:
+        output_path = Path(output)
+        output_path.write_text(
+            json.dumps(pack.model_dump(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        console.print(f"\n[green]Content saved to: {output_path}[/green]")
 
 
 def _display_results(result: BookResult, top_n: int = 10) -> None:
