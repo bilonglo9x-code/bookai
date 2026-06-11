@@ -670,37 +670,47 @@ def _find_related_chunks(
 # AI Rewrite — Use LLM to produce polished radio scripts
 # ---------------------------------------------------------------------------
 
-_RADIO_REWRITE_PROMPT = """Bạn là scriptwriter chuyên viết kịch bản "radio sách" cho TikTok/Reels.
-Phong cách: giống kênh @sachhayexpress (660K followers).
+_RADIO_REWRITE_PROMPT = """Bạn là scriptwriter viết kịch bản radio sách dài cho TikTok/YouTube.
+Phong cách: @sachhayexpress — giọng kể chuyện trầm, sâu lắng, triết lý.
 
-Từ đoạn sách dưới đây, viết 1 kịch bản radio sách hoàn chỉnh.
+Từ đoạn trích sách dưới đây, hãy VIẾT LẠI thành kịch bản radio hoàn chỉnh {duration_target}.
+KHÔNG chỉ copy nguyên văn — hãy diễn giải, mở rộng, thêm ví dụ,
+kể chuyện để người nghe dễ hiểu.
 
 THÔNG TIN:
 - Tên sách: {book_title}
 - Tác giả: {author}
-- Đoạn sách:
+- Đoạn trích gốc (dùng làm nguồn ý tưởng, KHÔNG copy nguyên):
 ---
 {chunk_text}
 ---
 
-YÊU CẦU:
-1. HOOK (1-2 câu mở đầu gây sốc/tò mò, khiến người ta dừng scroll)
-2. BODY (nội dung chính 4-8 câu, dạng listicle tips ngắn gọn, dễ hiểu)
-3. CTA (1-2 câu kêu gọi mua sách, tự nhiên không ép)
+CẤU TRÚC KỊCH BẢN:
+1. HOOK (2-3 câu mở đầu cực gây tò mò, tạo curiosity gap, khiến người ta PHẢI nghe tiếp)
+2. BODY (nội dung chính - PHẢI DÀI {word_target} từ):
+   - Giải thích ý tưởng từ sách bằng ngôn ngữ đời thường
+   - Thêm ví dụ thực tế, tình huống quen thuộc để minh họa
+   - Kể câu chuyện ngắn nếu phù hợp
+   - Phân tích sâu hơn, liên hệ với cuộc sống người nghe
+   - Có thể chia thành 3-5 điểm chính nếu nội dung dạng listicle
+3. CTA (2-3 câu kêu gọi tự nhiên: mua sách để đọc đầy đủ hơn)
 
 FORMAT trả về JSON:
 {{
-  "hook": "...",
-  "body": "...",
-  "cta": "...",
+  "hook": "nội dung hook 2-3 câu",
+  "body": "nội dung body DÀI {word_target} từ trở lên",
+  "cta": "nội dung CTA 2-3 câu",
   "title": "tiêu đề ngắn cho video"
 }}
 
-Lưu ý:
-- Giọng văn tự nhiên, conversational, như đang NÓI chứ không viết
-- Dùng "bạn" để nói chuyện trực tiếp với người nghe
-- Tổng kịch bản 90-150 giây khi đọc (khoảng 220-370 từ)
-- KHÔNG dùng emoji, KHÔNG dùng tiếng Anh
+QUAN TRỌNG:
+- Body phải DÀI ÍT NHẤT {word_target} từ — đây là video {duration_target}, không phải clip 30 giây
+- Giọng văn tự nhiên, conversational, như đang KỂ CHUYỆN cho bạn bè nghe
+- Dùng "bạn" để nói chuyện trực tiếp
+- Diễn giải bằng ngôn ngữ đơn giản, ai cũng hiểu được
+- Thêm câu chuyển đoạn: "Và đây là điều thú vị...",
+  "Bạn biết không...", "Hãy tưởng tượng thế này..."
+- KHÔNG dùng emoji, KHÔNG dùng tiếng Anh, KHÔNG dùng markdown formatting
 - Chỉ trả về JSON, không giải thích thêm."""
 
 _CAPTION_REWRITE_PROMPT = """Viết caption TikTok hấp dẫn cho đoạn sách sau.
@@ -730,8 +740,11 @@ def _call_llm_for_rewrite(
     api_key: str | None = None,
     model: str = "gpt-4o-mini",
     base_url: str | None = None,
+    max_retries: int = 3,
 ) -> str:
     """Call LLM for content rewriting (uses same infrastructure as analyzer)."""
+    import time as _time
+
     import httpx
 
     api_key = api_key or os.environ.get("OPENAI_API_KEY") or os.environ.get("key_api", "")
@@ -742,19 +755,31 @@ def _call_llm_for_rewrite(
     if not url.endswith("/chat/completions"):
         url = url.rstrip("/") + "/chat/completions"
 
-    response = httpx.post(
-        url,
-        headers={"Authorization": f"Bearer {api_key}"},
-        json={
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.7,
-            "max_tokens": 2000,
-            "stream": False,
-        },
-        timeout=120.0,
-    )
-    response.raise_for_status()
+    last_error: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            response = httpx.post(
+                url,
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.7,
+                    "max_tokens": 4000,
+                    "stream": False,
+                },
+                timeout=180.0,
+            )
+            response.raise_for_status()
+            break
+        except (httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException) as e:
+            last_error = e
+            if attempt < max_retries - 1:
+                _time.sleep(3 * (attempt + 1))
+            else:
+                raise
+    else:
+        raise last_error  # type: ignore[misc]
 
     # Handle SSE streaming responses
     text = response.text.strip()
@@ -786,13 +811,22 @@ def ai_rewrite_radio_scripts(
     api_key: str | None = None,
     model: str = "gpt-4o-mini",
     base_url: str | None = None,
+    duration_minutes: int = 3,
 ) -> list[RadioScript]:
     """Generate radio scripts using AI rewriting for higher quality.
 
     Unlike generate_radio_scripts() which uses templates, this function
-    sends each chunk to an LLM with a scriptwriter prompt to produce
-    polished, natural-sounding radio scripts.
+    sends combined chunks to an LLM which REWRITES and EXPANDS the content
+    into polished, natural-sounding radio scripts of 1-5 minutes.
+
+    Args:
+        duration_minutes: Target duration in minutes (1-5). Default 3 minutes.
     """
+    # Calculate word target based on duration (Vietnamese ~2.5 words/sec)
+    duration_minutes = max(1, min(5, duration_minutes))
+    word_target = duration_minutes * 150  # ~150 words/min for Vietnamese narration
+    duration_target = f"{duration_minutes} phút ({duration_minutes * 60} giây)"
+
     radio_labels = {ChunkLabel.INSIGHT, ChunkLabel.STORY, ChunkLabel.TIP,
                     ChunkLabel.HOOK, ChunkLabel.CONTROVERSIAL}
     candidates = sorted(
@@ -804,18 +838,34 @@ def ai_rewrite_radio_scripts(
     scripts: list[RadioScript] = []
     used_ids: set[str] = set()
 
-    for chunk_data in candidates:
+    for primary in candidates:
         if len(scripts) >= max_scripts:
             break
-        cid = chunk_data.chunk.chunk_id
+        cid = primary.chunk.chunk_id
         if cid in used_ids:
             continue
         used_ids.add(cid)
 
+        # Gather related chunks to provide MORE source material for AI
+        related = _find_related_chunks(primary, candidates, used_ids, target_words=800)
+        for rc in related:
+            used_ids.add(rc.chunk.chunk_id)
+
+        all_chunks = [primary] + related
+        # Combine text from all related chunks (give AI plenty of material)
+        combined_text = '\n\n'.join(c.chunk.text.strip() for c in all_chunks)
+        chunk_ids = [c.chunk.chunk_id for c in all_chunks]
+
+        # Truncate to reasonable size for API (max ~4000 chars)
+        if len(combined_text) > 4000:
+            combined_text = combined_text[:4000]
+
         prompt = _RADIO_REWRITE_PROMPT.format(
             book_title=metadata.title,
             author=metadata.author,
-            chunk_text=chunk_data.chunk.text[:2000],
+            chunk_text=combined_text,
+            duration_target=duration_target,
+            word_target=word_target,
         )
 
         try:
@@ -838,7 +888,7 @@ def ai_rewrite_radio_scripts(
             if not hook or not body:
                 continue
 
-            hashtags = _build_hashtags(chunk_data.labels, metadata.title)
+            hashtags = _build_hashtags(primary.labels, metadata.title)
             full = f"{hook}\n\n{body}\n\n{cta}"
             est = _estimate_read_seconds(full)
 
@@ -849,19 +899,19 @@ def ai_rewrite_radio_scripts(
                 cta=cta,
                 hashtags=hashtags,
                 estimated_seconds=est,
-                source_chunks=[cid],
+                source_chunks=chunk_ids,
             ))
         except Exception:
-            # Fallback to template-based generation
-            text = chunk_data.chunk.text.strip()
-            summary = chunk_data.summary or ""
-            hook = _make_hook(chunk_data, metadata)
-            body = _make_body(text, summary)
+            # Fallback to template-based generation with long body
+            combined_clean = combined_text.replace('\n', ' ')
+            hook = _make_hook(primary, metadata)
+            body = _make_body_long(combined_clean, target_words=word_target)
             cta = (
-                f'Nếu bạn muốn tìm hiểu sâu hơn, hãy đọc cuốn "{metadata.title}" '
-                f"của tác giả {metadata.author}. Link sách ở giỏ hàng bên dưới."
+                f'Nếu bạn muốn khám phá thêm nhiều bài học sâu sắc như thế này, '
+                f'hãy đọc cuốn "{metadata.title}" của tác giả {metadata.author}. '
+                f'Link mua sách ở giỏ hàng bên dưới video nhé.'
             )
-            hashtags = _build_hashtags(chunk_data.labels, metadata.title)
+            hashtags = _build_hashtags(primary.labels, metadata.title)
             full = f"{hook}\n\n{body}\n\n{cta}"
             est = _estimate_read_seconds(full)
             scripts.append(RadioScript(
@@ -871,7 +921,7 @@ def ai_rewrite_radio_scripts(
                 cta=cta,
                 hashtags=hashtags,
                 estimated_seconds=est,
-                source_chunks=[cid],
+                source_chunks=chunk_ids,
             ))
 
     return scripts
@@ -998,16 +1048,19 @@ def generate_all_with_ai(
     base_url: str | None = None,
     output_dir: str | Path | None = None,
     image_theme: str = "dark",
+    duration_minutes: int = 3,
 ) -> ContentPack:
     """Generate all content types using AI rewriting for premium quality.
 
     This is the AI-powered version of generate_all(). It uses LLM to
-    rewrite radio scripts and captions for more natural, engaging output.
+    rewrite and EXPAND book content into radio scripts (1-5 min) and
+    captions for more natural, engaging output.
     Also generates quote card images if output_dir is provided.
     """
     radio = ai_rewrite_radio_scripts(
         analyzed, metadata,
         api_key=api_key, model=model, base_url=base_url,
+        duration_minutes=duration_minutes,
     )
     quotes = generate_quote_cards(analyzed, metadata)
     listicles = generate_listicles(analyzed, metadata)

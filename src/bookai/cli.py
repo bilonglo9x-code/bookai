@@ -307,16 +307,19 @@ def generate_ai(
     format: str = typer.Option(
         "all", "--format", help="Content type: all, radio, quote, listicle, caption"
     ),
+    duration: int = typer.Option(
+        3, "--duration", help="Target video duration in minutes (1-5)"
+    ),
 ) -> None:
     """Generate premium content using AI rewriting + quote card images.
 
     Unlike `generate` (template-based), this command uses an LLM to
-    rewrite radio scripts and captions in natural @sachhayexpress style.
+    rewrite and EXPAND book content into natural radio scripts (1-5 min).
     Also renders PNG quote card images ready for Instagram/Pinterest.
 
     Examples:
-        bookai generate-ai results.json --base-url https://api.example.com/v1 --model gemini
-        bookai generate-ai results.json --images ./cards --theme warm
+        bookai generate-ai results.json --base-url https://api.example.com/v1 --duration 3
+        bookai generate-ai results.json --images ./cards --theme warm --duration 5
         bookai generate-ai results.json -o content.json --images ./output/cards
     """
     path = Path(input_json)
@@ -345,6 +348,7 @@ def generate_ai(
         base_url=base_url,
         output_dir=images_dir,
         image_theme=image_theme,
+        duration_minutes=duration,
     )
 
     # Display summary
