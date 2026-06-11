@@ -12,7 +12,11 @@ from rich.table import Table
 
 from .analyzer import analyze_chunks, analyze_chunks_batch
 from .chunker import chunk_markdown
-from .content_studio import generate_all
+from .content_studio import (
+    generate_all,
+    generate_all_with_ai,
+    generate_quote_images,
+)
 from .converter import convert_file
 from .models import BookResult, ChunkLabel
 
@@ -281,6 +285,187 @@ def generate(
             encoding="utf-8",
         )
         console.print(f"\n[green]Content saved to: {output_path}[/green]")
+
+
+@app.command("generate-ai")
+def generate_ai(
+    input_json: str = typer.Argument(help="Path to analysis result JSON (from `process -o`)"),
+    output: str | None = typer.Option(None, "-o", "--output", help="Output JSON file path"),
+    images_dir: str | None = typer.Option(
+        None, "--images", help="Directory to save quote card images"
+    ),
+    image_theme: str = typer.Option(
+        "dark", "--theme", help="Image theme: dark, light, gradient_blue, warm"
+    ),
+    model: str = typer.Option("gpt-4o-mini", "--model", help="Model for AI rewriting"),
+    api_key: str | None = typer.Option(None, "--api-key", help="API key"),
+    base_url: str | None = typer.Option(
+        None, "--base-url", help="Custom API base URL (OpenAI-compatible)"
+    ),
+    format: str = typer.Option(
+        "all", "--format", help="Content type: all, radio, quote, listicle, caption"
+    ),
+) -> None:
+    """Generate premium content using AI rewriting + quote card images.
+
+    Unlike `generate` (template-based), this command uses an LLM to
+    rewrite radio scripts and captions in natural @sachhayexpress style.
+    Also renders PNG quote card images ready for Instagram/Pinterest.
+
+    Examples:
+        bookai generate-ai results.json --base-url https://api.example.com/v1 --model gemini
+        bookai generate-ai results.json --images ./cards --theme warm
+        bookai generate-ai results.json -o content.json --images ./output/cards
+    """
+    path = Path(input_json)
+    if not path.exists():
+        console.print(f"[red]Error: File not found: {input_json}[/red]")
+        raise typer.Exit(1)
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    result = BookResult(**data)
+
+    if not result.analyzed:
+        console.print("[red]No analyzed chunks found in input. Run `process` first.[/red]")
+        raise typer.Exit(1)
+
+    console.print(
+        f"\n[bold blue]🎬 AI Content Generation:[/bold blue] "
+        f"{result.metadata.title} ({len(result.analyzed)} chunks)"
+    )
+
+    # Generate with AI rewriting
+    pack = generate_all_with_ai(
+        result.analyzed,
+        result.metadata,
+        api_key=api_key,
+        model=model,
+        base_url=base_url,
+        output_dir=images_dir,
+        image_theme=image_theme,
+    )
+
+    # Display summary
+    console.print(f"\n[bold green]Total content pieces: {pack.total_pieces}[/bold green]\n")
+
+    # Radio scripts
+    if pack.radio_scripts and format in ("all", "radio"):
+        console.print(f"[bold]🎙️ AI Radio Scripts ({len(pack.radio_scripts)}):[/bold]\n")
+        for i, script in enumerate(pack.radio_scripts, 1):
+            console.print(Panel(
+                f"[bold cyan]HOOK:[/bold cyan] {script.hook}\n\n"
+                f"[bold]BODY:[/bold] {script.body[:400]}"
+                f"{'...' if len(script.body) > 400 else ''}\n\n"
+                f"[bold yellow]CTA:[/bold yellow] {script.cta}\n\n"
+                f"[dim]~{script.estimated_seconds}s | "
+                f"{'  '.join('#' + t for t in script.hashtags)}[/dim]",
+                title=f"Script #{i}: {script.title}",
+                border_style="cyan",
+            ))
+
+    # Quote cards
+    if pack.quote_cards and format in ("all", "quote"):
+        console.print(f"\n[bold]📸 Quote Cards ({len(pack.quote_cards)}):[/bold]\n")
+        table = Table()
+        table.add_column("#", width=3)
+        table.add_column("Quote", max_width=60)
+        table.add_column("Caption preview", max_width=40)
+        for i, card in enumerate(pack.quote_cards[:10], 1):
+            table.add_row(
+                str(i),
+                card.quote_text[:80] + ("..." if len(card.quote_text) > 80 else ""),
+                card.caption[:50] + "...",
+            )
+        console.print(table)
+
+    # Images generated?
+    if images_dir:
+        img_path = Path(images_dir)
+        if img_path.exists():
+            png_count = len(list(img_path.glob("*.png")))
+            console.print(
+                f"\n[bold green]🖼️ Generated {png_count} quote card images "
+                f"in: {images_dir}[/bold green]"
+            )
+
+    # Listicles
+    if pack.listicles and format in ("all", "listicle"):
+        console.print(f"\n[bold]📋 Listicles ({len(pack.listicles)}):[/bold]\n")
+        for ls in pack.listicles:
+            console.print(Panel(
+                f"[bold]{ls.intro}[/bold]\n\n"
+                + "\n".join(ls.items)
+                + f"\n\n[yellow]{ls.cta}[/yellow]",
+                title=ls.title,
+                border_style="green",
+            ))
+
+    # Captions
+    if pack.captions and format in ("all", "caption"):
+        console.print(f"\n[bold]💬 AI Captions ({len(pack.captions)}):[/bold]\n")
+        for i, cap in enumerate(pack.captions[:5], 1):
+            console.print(Panel(
+                cap.text,
+                title=f"Caption #{i} ({cap.platform})",
+                border_style="magenta",
+            ))
+
+    # Save output
+    if output:
+        output_path = Path(output)
+        output_path.write_text(
+            json.dumps(pack.model_dump(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        console.print(f"\n[green]Content saved to: {output_path}[/green]")
+
+
+@app.command("render-quotes")
+def render_quotes(
+    input_json: str = typer.Argument(help="Path to analysis result JSON"),
+    output_dir: str = typer.Option("./quote_cards", "-o", "--output", help="Output directory"),
+    theme: str = typer.Option("dark", "--theme", help="Theme: dark, light, gradient_blue, warm"),
+    max_cards: int = typer.Option(10, "--max", help="Maximum number of cards"),
+    min_score: float = typer.Option(5.0, "--min-score", help="Minimum viral score"),
+) -> None:
+    """Render quote cards as PNG images.
+
+    Generates beautiful 1080x1080 quote card images ready for
+    Instagram, Pinterest, or any visual platform.
+
+    Examples:
+        bookai render-quotes results.json -o ./cards --theme warm
+        bookai render-quotes results.json --max 20 --theme gradient_blue
+    """
+    path = Path(input_json)
+    if not path.exists():
+        console.print(f"[red]Error: File not found: {input_json}[/red]")
+        raise typer.Exit(1)
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    result = BookResult(**data)
+
+    if not result.analyzed:
+        console.print("[red]No analyzed chunks found. Run `process` first.[/red]")
+        raise typer.Exit(1)
+
+    console.print(
+        f"\n[bold blue]🖼️ Rendering quote cards:[/bold blue] "
+        f"{result.metadata.title} (theme: {theme})"
+    )
+
+    paths = generate_quote_images(
+        result.analyzed,
+        result.metadata,
+        output_dir=output_dir,
+        max_cards=max_cards,
+        min_score=min_score,
+        theme=theme,
+    )
+
+    console.print(f"\n[bold green]Generated {len(paths)} quote card images:[/bold green]")
+    for p in paths:
+        console.print(f"  {p}")
 
 
 def _display_results(result: BookResult, top_n: int = 10) -> None:

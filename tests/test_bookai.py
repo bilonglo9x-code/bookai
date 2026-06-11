@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -11,10 +12,13 @@ from bookai.analyzer import _mock_analyze, analyze_chunks
 from bookai.chunker import _split_chapters, _split_sentences, chunk_markdown
 from bookai.content_studio import (
     ContentPack,
+    ai_rewrite_radio_scripts,
     generate_all,
+    generate_all_with_ai,
     generate_captions,
     generate_listicles,
     generate_quote_cards,
+    generate_quote_images,
     generate_radio_scripts,
 )
 from bookai.converter import convert_file, convert_text
@@ -26,6 +30,7 @@ from bookai.models import (
     ChunkLabel,
     SourceFormat,
 )
+from bookai.quote_renderer import render_quote_card, render_quote_cards_batch
 
 # --- Model tests ---
 
@@ -409,3 +414,208 @@ class TestContentStudio:
         ]
         scripts = generate_radio_scripts(analyzed, metadata, min_score=6.0)
         assert scripts == []
+
+
+# --- Quote Card Renderer tests ---
+
+
+class TestQuoteRenderer:
+    def test_render_single_quote_card(self):
+        """Test rendering a single quote card PNG."""
+        with tempfile.TemporaryDirectory() as tmp:
+            output_path = Path(tmp) / "test_quote.png"
+            result = render_quote_card(
+                quote_text="Hãy sống như thể ngày mai bạn sẽ chết.",
+                book_title="Thức tỉnh mục đích sống",
+                author="Eckhart Tolle",
+                output_path=output_path,
+                theme="dark",
+            )
+            assert result.exists()
+            assert result.suffix == ".png"
+            # Check file is not empty (PNG has header)
+            assert result.stat().st_size > 1000
+
+    def test_render_quote_card_light_theme(self):
+        """Test light theme rendering."""
+        with tempfile.TemporaryDirectory() as tmp:
+            output_path = Path(tmp) / "light.png"
+            result = render_quote_card(
+                quote_text="Mỗi khoảnh khắc đều là một cơ hội mới.",
+                book_title="Sống Trọn Vẹn",
+                author="Tác giả",
+                output_path=output_path,
+                theme="light",
+            )
+            assert result.exists()
+            assert result.stat().st_size > 1000
+
+    def test_render_quote_card_gradient_blue(self):
+        """Test gradient_blue theme."""
+        with tempfile.TemporaryDirectory() as tmp:
+            output_path = Path(tmp) / "blue.png"
+            result = render_quote_card(
+                quote_text="Tĩnh lặng không phải là vắng bóng tiếng ồn.",
+                book_title="Sức mạnh của tĩnh lặng",
+                author="Eckhart Tolle",
+                output_path=output_path,
+                theme="gradient_blue",
+            )
+            assert result.exists()
+
+    def test_render_batch_quote_cards(self):
+        """Test batch rendering multiple quote cards."""
+        with tempfile.TemporaryDirectory() as tmp:
+            quotes = [
+                {"quote_text": "Quote one", "book_title": "Book A", "author": "Author"},
+                {"quote_text": "Quote two", "book_title": "Book A", "author": "Author"},
+                {"quote_text": "Quote three", "book_title": "Book A", "author": "Author"},
+            ]
+            paths = render_quote_cards_batch(quotes, output_dir=tmp, theme="dark")
+            assert len(paths) == 3
+            for p in paths:
+                assert p.exists()
+                assert p.suffix == ".png"
+
+    def test_render_creates_output_dir(self):
+        """Test that missing output directories are created."""
+        with tempfile.TemporaryDirectory() as tmp:
+            nested = Path(tmp) / "deep" / "nested" / "dir"
+            output_path = nested / "quote.png"
+            result = render_quote_card(
+                quote_text="Test quote",
+                book_title="Test",
+                author="Author",
+                output_path=output_path,
+            )
+            assert result.exists()
+
+    def test_render_long_quote_wraps(self):
+        """Test that long quotes are wrapped properly."""
+        long_quote = (
+            "Đây là một câu trích dẫn rất dài cần được wrap lại nhiều dòng "
+            "để hiển thị đẹp trên ảnh quote card. Nội dung sẽ tự động xuống "
+            "dòng khi quá dài và vẫn giữ được thẩm mỹ tốt."
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            output_path = Path(tmp) / "long.png"
+            result = render_quote_card(
+                quote_text=long_quote,
+                book_title="Sách Hay",
+                author="Tác giả",
+                output_path=output_path,
+            )
+            assert result.exists()
+            assert result.stat().st_size > 1000
+
+
+class TestQuoteImageGeneration:
+    """Test generate_quote_images integration with content_studio."""
+
+    def test_generate_quote_images_from_analyzed(self):
+        """Test generating quote images from analyzed chunks."""
+        analyzed, metadata = _make_analyzed_chunks()
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = generate_quote_images(
+                analyzed, metadata,
+                output_dir=tmp,
+                max_cards=3,
+                min_score=5.0,
+                theme="dark",
+            )
+            assert len(paths) >= 1
+            for p in paths:
+                assert p.exists()
+                assert p.suffix == ".png"
+
+    def test_generate_quote_images_empty(self):
+        """Test with no qualifying chunks."""
+        metadata = BookMetadata(title="Empty")
+        paths = generate_quote_images(
+            [], metadata, output_dir="/tmp/empty_test", max_cards=5
+        )
+        assert paths == []
+
+    def test_generate_quote_images_warm_theme(self):
+        """Test with warm theme."""
+        analyzed, metadata = _make_analyzed_chunks()
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = generate_quote_images(
+                analyzed, metadata,
+                output_dir=tmp,
+                max_cards=2,
+                theme="warm",
+            )
+            assert len(paths) >= 1
+
+
+class TestAIRewrite:
+    """Test AI rewrite functions (with mocked LLM calls)."""
+
+    def test_ai_rewrite_radio_scripts_fallback(self):
+        """Test that AI rewrite falls back to template on API error."""
+        analyzed, metadata = _make_analyzed_chunks()
+        with patch(
+            "bookai.content_studio._call_llm_for_rewrite",
+            side_effect=ValueError("No API key"),
+        ):
+            scripts = ai_rewrite_radio_scripts(
+                analyzed, metadata,
+                max_scripts=2, min_score=6.0,
+            )
+            # Should fallback to template generation
+            assert len(scripts) >= 1
+            assert scripts[0].hook
+            assert scripts[0].body
+            assert scripts[0].cta
+
+    def test_ai_rewrite_radio_scripts_success(self):
+        """Test AI rewrite with mocked successful LLM response."""
+        analyzed, metadata = _make_analyzed_chunks()
+        mock_response = (
+            '{"hook": "Bạn có biết tại sao 90% người thất bại?", '
+            '"body": "Theo nghiên cứu, người thành công có 3 thói quen...", '
+            '"cta": "Đọc cuốn sách này để biết thêm.", '
+            '"title": "Bí mật thành công"}'
+        )
+        with patch(
+            "bookai.content_studio._call_llm_for_rewrite",
+            return_value=mock_response,
+        ):
+            scripts = ai_rewrite_radio_scripts(
+                analyzed, metadata,
+                max_scripts=2, min_score=6.0,
+            )
+            assert len(scripts) >= 1
+            assert "90%" in scripts[0].hook
+            assert scripts[0].title == "Bí mật thành công"
+
+    def test_generate_all_with_ai_fallback(self):
+        """Test generate_all_with_ai with mocked API errors."""
+        analyzed, metadata = _make_analyzed_chunks()
+        with patch(
+            "bookai.content_studio._call_llm_for_rewrite",
+            side_effect=ValueError("No API key"),
+        ):
+            pack = generate_all_with_ai(analyzed, metadata)
+            assert isinstance(pack, ContentPack)
+            # Should still produce content via fallback
+            assert pack.total_pieces > 0
+
+    def test_generate_all_with_ai_and_images(self):
+        """Test generate_all_with_ai with image generation."""
+        analyzed, metadata = _make_analyzed_chunks()
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch(
+                "bookai.content_studio._call_llm_for_rewrite",
+                side_effect=ValueError("No API key"),
+            ):
+                pack = generate_all_with_ai(
+                    analyzed, metadata,
+                    output_dir=tmp,
+                    image_theme="light",
+                )
+                assert pack.total_pieces > 0
+                # Check images were generated
+                png_files = list(Path(tmp).glob("*.png"))
+                assert len(png_files) >= 1
