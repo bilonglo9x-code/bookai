@@ -163,31 +163,82 @@ def _estimate_read_seconds(text: str) -> int:
     return max(15, int(words / 2.5))
 
 
-def _extract_best_sentence(text: str, max_len: int = 200) -> str:
-    """Pick the first strong sentence from a chunk (for quotes)."""
-    # Split on Vietnamese sentence enders
+def _split_complete_sentences(text: str) -> list[str]:
+    """Split text into complete Vietnamese sentences.
+
+    Handles Vietnamese punctuation properly, avoiding cuts mid-sentence.
+    Cleans up line breaks within sentences.
+    """
+    import re as _re
+    # First, normalize line breaks within sentences (PDF often breaks mid-line)
+    clean = _re.sub(r'\n(?![A-ZĐ\d\-\(])', ' ', text)  # Join lines that don't start a new sentence
+    clean = _re.sub(r'\s{2,}', ' ', clean)
+    # Split on sentence-ending punctuation followed by space/newline
+    parts = _re.split(r'(?<=[.!?…])[\s\n]+', clean)
     sentences = []
-    for sep in [".", "!", "?"]:
-        for part in text.split(sep):
-            part = part.strip()
-            if 20 < len(part) <= max_len:
-                sentences.append(part + sep)
+    for p in parts:
+        p = p.strip()
+        if len(p) >= 15:  # Skip very short fragments
+            sentences.append(p)
+    return sentences
+
+
+def _extract_best_quote(text: str, min_len: int = 40, max_len: int = 300) -> str:
+    """Extract the best complete sentence(s) for a quote card.
+
+    Picks 1-3 complete sentences that form a meaningful, self-contained quote.
+    Prioritizes sentences with emotional/philosophical content.
+    """
+    sentences = _split_complete_sentences(text)
 
     if not sentences:
-        # Fallback: first max_len chars
-        return text[:max_len].rsplit(" ", 1)[0] + "..."
+        # Fallback: take text up to first natural break
+        clean = text.replace('\n', ' ').strip()
+        if len(clean) <= max_len:
+            return clean
+        # Find last sentence end within max_len
+        for end in ['.', '!', '?', '…']:
+            idx = clean.rfind(end, 0, max_len)
+            if idx > min_len:
+                return clean[:idx + 1]
+        return clean[:max_len].rsplit(' ', 1)[0] + '...'
 
-    # Prefer sentences with emotional/action words
+    # Score each sentence for "quotability"
     _boost = [
-        "bạn", "chúng ta", "tại sao", "hãy", "đừng", "sự thật",
-        "không ai", "mọi người", "bí mật", "sai lầm", "thay đổi",
+        'bạn', 'chúng ta', 'tại sao', 'hãy', 'đừng', 'sự thật',
+        'không ai', 'mọi người', 'bí mật', 'sai lầm', 'thay đổi',
+        'cuộc sống', 'hạnh phúc', 'đau khổ', 'tâm trí', 'ý thức',
+        'tỉnh thức', 'hiện tại', 'bản ngã', 'tự do', 'sợ hãi',
     ]
-    scored = []
-    for s in sentences:
+    scored: list[tuple[float, int, str]] = []
+    for i, s in enumerate(sentences):
+        if len(s) < min_len or len(s) > max_len:
+            continue
         score = sum(1 for w in _boost if w in s.lower())
-        scored.append((score, s))
-    scored.sort(key=lambda x: -x[0])
-    return scored[0][1]
+        # Bonus for sentences that start with a strong opening
+        if any(s.startswith(w) for w in ['Khi', 'Nếu', 'Sự', 'Bạn', 'Đừng', 'Hãy']):
+            score += 1
+        scored.append((score, i, s))
+
+    if scored:
+        scored.sort(key=lambda x: -x[0])
+        best = scored[0][2]
+        # If best sentence is short, try to combine with next sentence
+        if len(best) < 80 and scored[0][1] + 1 < len(sentences):
+            next_sent = sentences[scored[0][1] + 1]
+            combined = best + ' ' + next_sent
+            if len(combined) <= max_len:
+                return combined
+        return best
+
+    # Fallback: combine first 2-3 sentences up to max_len
+    combined = ''
+    for s in sentences:
+        if len(combined) + len(s) + 1 <= max_len:
+            combined = (combined + ' ' + s).strip()
+        else:
+            break
+    return combined if combined else text[:max_len].rsplit(' ', 1)[0] + '...'
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +255,7 @@ def generate_radio_scripts(
     """Generate radio narration scripts (90-150s) from top-scored chunks.
 
     Format inspired by @sachhayexpress: hook -> body points -> CTA.
+    Combines 2-4 related chunks to achieve 90-150s duration (~300-500 words).
     """
     # Pick chunks suitable for radio: high score, has insight/story/tip
     radio_labels = {ChunkLabel.INSIGHT, ChunkLabel.STORY, ChunkLabel.TIP,
@@ -217,30 +269,37 @@ def generate_radio_scripts(
     scripts: list[RadioScript] = []
     used_ids: set[str] = set()
 
-    for chunk_data in candidates:
+    for primary in candidates:
         if len(scripts) >= max_scripts:
             break
-        cid = chunk_data.chunk.chunk_id
+        cid = primary.chunk.chunk_id
         if cid in used_ids:
             continue
         used_ids.add(cid)
 
-        text = chunk_data.chunk.text.strip()
-        summary = chunk_data.summary or ""
+        # Gather related chunks to form a longer script (target 300-500 words)
+        related_chunks = _find_related_chunks(primary, candidates, used_ids, target_words=400)
+        for rc in related_chunks:
+            used_ids.add(rc.chunk.chunk_id)
+
+        all_chunks = [primary] + related_chunks
+        combined_text = '\n\n'.join(c.chunk.text.strip() for c in all_chunks)
+        chunk_ids = [c.chunk.chunk_id for c in all_chunks]
 
         # --- Hook (3-5s): a curiosity-gap opener ---
-        hook = _make_hook(chunk_data, metadata)
+        hook = _make_hook(primary, metadata)
 
-        # --- Body: the main points from the chunk ---
-        body = _make_body(text, summary)
+        # --- Body: full content from combined chunks ---
+        body = _make_body_long(combined_text, target_words=400)
 
         # --- CTA (call to action) ---
         cta = (
-            f'Nếu bạn muốn tìm hiểu sâu hơn, hãy đọc cuốn "{metadata.title}" '
-            f"của tác giả {metadata.author}. Link sách ở giỏ hàng bên dưới."
+            f'Nếu bạn muốn khám phá thêm nhiều bài học sâu sắc như thế này, '
+            f'hãy đọc cuốn "{metadata.title}" của tác giả {metadata.author}. '
+            f'Link mua sách ở giỏ hàng bên dưới video nhé.'
         )
 
-        hashtags = _build_hashtags(chunk_data.labels, metadata.title)
+        hashtags = _build_hashtags(primary.labels, metadata.title)
         full = f"{hook}\n\n{body}\n\n{cta}"
         est = _estimate_read_seconds(full)
 
@@ -251,7 +310,7 @@ def generate_radio_scripts(
             cta=cta,
             hashtags=hashtags,
             estimated_seconds=est,
-            source_chunks=[cid],
+            source_chunks=chunk_ids,
         ))
 
     return scripts
@@ -263,7 +322,10 @@ def generate_quote_cards(
     max_cards: int = 10,
     min_score: float = 5.0,
 ) -> list[QuoteCard]:
-    """Generate quote card content from chunks labelled as quote/insight."""
+    """Generate quote card content from chunks labelled as quote/insight.
+
+    Extracts complete, meaningful sentences that work as standalone quotes.
+    """
     candidates = sorted(
         [a for a in analyzed
          if a.viral_score >= min_score
@@ -272,12 +334,26 @@ def generate_quote_cards(
     )
 
     cards: list[QuoteCard] = []
-    for chunk_data in candidates[:max_cards]:
-        quote = _extract_best_sentence(chunk_data.chunk.text)
+    seen_quotes: set[str] = set()  # Avoid duplicate/similar quotes
+
+    for chunk_data in candidates:
+        if len(cards) >= max_cards:
+            break
+
+        quote = _extract_best_quote(chunk_data.chunk.text, min_len=40, max_len=280)
+
+        # Skip if too similar to existing quote
+        quote_key = quote[:50].lower()
+        if quote_key in seen_quotes:
+            continue
+        seen_quotes.add(quote_key)
+
+        # Build a proper caption with the full quote
+        short_quote = quote if len(quote) <= 100 else quote[:97] + '...'
         caption = (
-            f'"{quote[:80]}..." '
-            f'- Trích "{metadata.title}" ({metadata.author})\n\n'
-            f"Save lại nếu bạn thấy hay!"
+            f'"{short_quote}"\n\n'
+            f'— {metadata.author}, "{metadata.title}"\n\n'
+            f'Save lại nếu bạn thấy hay! Link sách ở giỏ hàng.'
         )
         hashtags = _build_hashtags(chunk_data.labels, metadata.title, ["quotesach"])
         cards.append(QuoteCard(
@@ -336,7 +412,7 @@ def generate_listicles(
         items: list[str] = []
         chunk_ids: list[str] = []
         for idx, a in enumerate(top_items, 1):
-            summary = a.summary or _extract_best_sentence(a.chunk.text, max_len=150)
+            summary = a.summary or _extract_best_quote(a.chunk.text, min_len=30, max_len=200)
             items.append(f"{idx}. {summary}")
             chunk_ids.append(a.chunk.chunk_id)
 
@@ -379,8 +455,8 @@ def generate_captions(
 
     captions: list[Caption] = []
     for chunk_data in top:
-        summary = chunk_data.summary or _extract_best_sentence(
-            chunk_data.chunk.text, max_len=120
+        summary = chunk_data.summary or _extract_best_quote(
+            chunk_data.chunk.text, min_len=30, max_len=150
         )
         hashtags = _build_hashtags(chunk_data.labels, metadata.title)
         tags_str = " ".join(f"#{t}" for t in hashtags)
@@ -471,43 +547,123 @@ def generate_all(
 
 
 def _make_hook(chunk_data: AnalyzedChunk, metadata: BookMetadata) -> str:
-    """Create a curiosity-gap hook for a radio script."""
+    """Create a curiosity-gap hook for a radio script (1-2 sentences, gây tò mò)."""
     text = chunk_data.chunk.text
     labels = set(chunk_data.labels)
+    sentences = _split_complete_sentences(text)
 
-    # Try to extract the first provocative sentence
-    first_sentence = _extract_best_sentence(text, max_len=120)
+    # Get first strong sentence
+    first_sentence = ''
+    if sentences:
+        # Find a short, punchy sentence for the hook
+        for s in sentences[:3]:
+            if 20 <= len(s) <= 150:
+                first_sentence = s
+                break
+        if not first_sentence:
+            first_sentence = sentences[0][:150]
+    else:
+        first_sentence = text[:150].rsplit(' ', 1)[0]
 
     if ChunkLabel.CONTROVERSIAL in labels:
-        return f"Bạn có biết rằng {first_sentence.lower()}"
+        return (
+            f"Có một sự thật mà ít người dám nói ra. {first_sentence}"
+        )
     if ChunkLabel.STORY in labels:
-        return f"Có một câu chuyện thế này... {first_sentence}"
+        return (
+            f"Có một câu chuyện thế này mà khi nghe xong, bạn sẽ nhìn "
+            f"cuộc sống khác đi hoàn toàn. {first_sentence}"
+        )
     if ChunkLabel.HOOK in labels:
         return first_sentence
     if ChunkLabel.INSIGHT in labels:
         return (
-            f"Trong cuốn \"{metadata.title}\", tác giả {metadata.author} "
-            f"chia sẻ một bài học quan trọng..."
+            f"Tác giả {metadata.author} đã chỉ ra một điều cực kỳ quan trọng "
+            f"mà hầu hết chúng ta đều bỏ qua. {first_sentence}"
         )
-    return f"Đây là điều ít người biết: {first_sentence}"
+    return f"Bạn có bao giờ tự hỏi... {first_sentence}"
 
 
 def _make_body(text: str, summary: str) -> str:
-    """Create the main body for a radio script from chunk text + summary."""
-    # Use summary if available, otherwise extract key sentences
-    if summary and len(summary) > 30:
-        body = summary
-    else:
-        # Extract 3-5 key sentences
-        sentences = [s.strip() for s in text.replace("!", ".").replace("?", ".").split(".")
-                     if len(s.strip()) > 20]
-        body = ". ".join(sentences[:5]) + "."
+    """Create the main body for a radio script from chunk text + summary.
 
-    # Keep body within radio length (roughly 200-400 words for 90-150s)
-    words = body.split()
-    if len(words) > 400:
-        body = " ".join(words[:400]) + "..."
-    return body
+    Legacy function for backward compatibility with single-chunk scripts.
+    """
+    return _make_body_long(text, target_words=400)
+
+
+def _make_body_long(text: str, target_words: int = 400) -> str:
+    """Create a full radio script body (300-500 words) from combined text.
+
+    Extracts complete sentences, preserving paragraph structure and
+    natural flow. Target: 90-150 seconds of narration.
+    """
+    # Clean up the text
+    clean = text.replace('\n', ' ').strip()
+    import re as _re
+    clean = _re.sub(r'\s{2,}', ' ', clean)
+
+    sentences = _split_complete_sentences(clean)
+    if not sentences:
+        # Fallback to raw text
+        words = clean.split()
+        return ' '.join(words[:target_words])
+
+    # Build body from complete sentences until we hit target word count
+    body_parts: list[str] = []
+    word_count = 0
+    min_words = int(target_words * 0.7)  # At least 70% of target
+
+    for sent in sentences:
+        sent_words = len(sent.split())
+        if word_count + sent_words > target_words + 50 and word_count >= min_words:
+            break
+        body_parts.append(sent)
+        word_count += sent_words
+
+    # If we got too little content, just use what we have
+    if not body_parts:
+        words = clean.split()
+        return ' '.join(words[:target_words])
+
+    return ' '.join(body_parts)
+
+
+def _find_related_chunks(
+    primary: AnalyzedChunk,
+    candidates: list[AnalyzedChunk],
+    used_ids: set[str],
+    target_words: int = 400,
+) -> list[AnalyzedChunk]:
+    """Find chunks related to the primary chunk to build a longer script.
+
+    Looks for chunks from the same chapter or with overlapping labels.
+    """
+    primary_words = len(primary.chunk.text.split())
+    if primary_words >= target_words:
+        return []  # Primary chunk is already long enough
+
+    needed_words = target_words - primary_words
+    related: list[AnalyzedChunk] = []
+    collected_words = 0
+
+    # Prefer chunks from same chapter, then same labels
+    for candidate in candidates:
+        if collected_words >= needed_words:
+            break
+        cid = candidate.chunk.chunk_id
+        if cid in used_ids or cid == primary.chunk.chunk_id:
+            continue
+
+        # Check relatedness: same chapter or overlapping labels
+        same_chapter = candidate.chunk.chapter == primary.chunk.chapter
+        shared_labels = set(candidate.labels) & set(primary.labels)
+
+        if same_chapter or len(shared_labels) >= 1:
+            related.append(candidate)
+            collected_words += len(candidate.chunk.text.split())
+
+    return related[:3]  # Max 3 additional chunks
 
 
 # ---------------------------------------------------------------------------
@@ -772,8 +928,8 @@ def ai_rewrite_captions(
             ))
         except Exception:
             # Fallback to template caption
-            summary = chunk_data.summary or _extract_best_sentence(
-                chunk_data.chunk.text, max_len=120
+            summary = chunk_data.summary or _extract_best_quote(
+                chunk_data.chunk.text, min_len=30, max_len=150
             )
             hashtags = _build_hashtags(chunk_data.labels, metadata.title)
             tags_str = " ".join(f"#{t}" for t in hashtags)
@@ -821,7 +977,7 @@ def generate_quote_images(
 
     quotes = []
     for chunk_data in candidates:
-        quote = _extract_best_sentence(chunk_data.chunk.text)
+        quote = _extract_best_quote(chunk_data.chunk.text, min_len=40, max_len=280)
         quotes.append({
             "quote_text": quote,
             "book_title": metadata.title,
