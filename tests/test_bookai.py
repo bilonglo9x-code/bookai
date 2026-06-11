@@ -21,7 +21,7 @@ from bookai.content_studio import (
     generate_quote_images,
     generate_radio_scripts,
 )
-from bookai.converter import convert_file, convert_text
+from bookai.converter import convert_file, convert_images_dir, convert_text
 from bookai.models import (
     AnalyzedChunk,
     BookMetadata,
@@ -619,3 +619,224 @@ class TestAIRewrite:
                 # Check images were generated
                 png_files = list(Path(tmp).glob("*.png"))
                 assert len(png_files) >= 1
+
+
+# --- OCR tests ---
+
+
+class TestOCR:
+    def test_ocr_image_basic(self):
+        """Test OCR on a simple image with text."""
+        # Create a test image with text using Pillow
+        from PIL import Image, ImageDraw
+
+        from bookai.ocr import ocr_image
+
+        with tempfile.TemporaryDirectory() as tmp:
+            img_path = Path(tmp) / "test_page.png"
+            img = Image.new("RGB", (800, 200), "white")
+            draw = ImageDraw.Draw(img)
+            # Use default font
+            draw.text((50, 80), "Hello World Test OCR", fill="black")
+            img.save(str(img_path))
+
+            metadata, text = ocr_image(str(img_path), lang="eng")
+            assert metadata.source_format.value == "image"
+            assert metadata.title == "test_page"
+            # OCR should extract some text (may not be perfect)
+            assert len(text) > 0
+
+    def test_ocr_images_batch(self):
+        """Test batch OCR on multiple images."""
+        from PIL import Image, ImageDraw
+
+        from bookai.ocr import ocr_images_batch
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # Create 3 test pages
+            for i in range(3):
+                img_path = Path(tmp) / f"page_{i:03d}.png"
+                img = Image.new("RGB", (800, 200), "white")
+                draw = ImageDraw.Draw(img)
+                draw.text((50, 80), f"Page {i + 1} content here", fill="black")
+                img.save(str(img_path))
+
+            files = sorted(str(f) for f in Path(tmp).glob("*.png"))
+            metadata, text = ocr_images_batch(files, lang="eng")
+            assert metadata.chapters == 3
+            assert "---" in text  # Pages separated by ---
+
+    def test_is_scanned_pdf(self):
+        """Test scanned PDF detection."""
+        # Create a text-based PDF (should NOT be detected as scanned)
+        import pymupdf
+
+        from bookai.ocr import is_scanned_pdf
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / "text_based.pdf"
+            doc = pymupdf.open()
+            page = doc.new_page()
+            # Insert plenty of text
+            text_content = "Đây là một đoạn văn bản tiếng Việt dài " * 20
+            page.insert_text((50, 100), text_content, fontsize=12)
+            doc.save(str(pdf_path))
+            doc.close()
+
+            assert is_scanned_pdf(str(pdf_path)) is False
+
+    def test_clean_ocr_text(self):
+        """Test OCR text cleaning."""
+        from bookai.ocr import _clean_ocr_text
+
+        # Test noise removal
+        dirty = "  Hello  World  \n\n\n\n\nParagraph two\n12\n---\nGood text"
+        clean = _clean_ocr_text(dirty)
+        assert "\n\n\n" not in clean
+        # Short noise lines should be removed
+        assert "12" not in clean
+
+    def test_convert_file_detects_image(self):
+        """Test that convert_file handles image files via OCR."""
+        from PIL import Image, ImageDraw
+
+        with tempfile.TemporaryDirectory() as tmp:
+            img_path = Path(tmp) / "test.png"
+            img = Image.new("RGB", (400, 100), "white")
+            draw = ImageDraw.Draw(img)
+            draw.text((20, 30), "Test image text", fill="black")
+            img.save(str(img_path))
+
+            metadata, text = convert_file(str(img_path))
+            assert metadata.source_format.value == "image"
+
+    def test_convert_images_dir(self):
+        """Test converting a directory of images."""
+        from PIL import Image, ImageDraw
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for i in range(2):
+                img_path = Path(tmp) / f"page_{i}.jpg"
+                img = Image.new("RGB", (400, 100), "white")
+                draw = ImageDraw.Draw(img)
+                draw.text((20, 30), f"Directory page {i}", fill="black")
+                img.save(str(img_path))
+
+            metadata, text = convert_images_dir(tmp, lang="eng")
+            assert metadata.chapters == 2
+
+
+# --- Audio transcription tests ---
+
+
+class TestAudio:
+    def test_is_supported_audio(self):
+        """Test audio format detection."""
+        from bookai.audio import is_supported_audio
+
+        assert is_supported_audio("file.mp3") is True
+        assert is_supported_audio("file.wav") is True
+        assert is_supported_audio("file.m4a") is True
+        assert is_supported_audio("file.flac") is True
+        assert is_supported_audio("file.ogg") is True
+        assert is_supported_audio("file.pdf") is False
+        assert is_supported_audio("file.txt") is False
+
+    def test_format_timestamp(self):
+        """Test timestamp formatting."""
+        from bookai.audio import _format_timestamp
+
+        assert _format_timestamp(0) == "00:00"
+        assert _format_timestamp(65) == "01:05"
+        assert _format_timestamp(3661) == "01:01:01"
+        assert _format_timestamp(125.7) == "02:05"
+
+    def test_estimate_chapters(self):
+        """Test chapter estimation from segments."""
+        from bookai.audio import _estimate_chapters
+
+        # No segments
+        assert _estimate_chapters([]) == 0
+
+        # Single continuous segment
+        segments = [{"start": 0, "end": 10}]
+        assert _estimate_chapters(segments) == 1
+
+        # Two segments with small gap (same chapter)
+        segments = [
+            {"start": 0, "end": 10},
+            {"start": 11, "end": 20},
+        ]
+        assert _estimate_chapters(segments) == 1
+
+        # Two segments with large gap (new chapter)
+        segments = [
+            {"start": 0, "end": 10},
+            {"start": 20, "end": 30},
+        ]
+        assert _estimate_chapters(segments) == 2
+
+    def test_segments_to_markdown(self):
+        """Test segment to markdown conversion."""
+        from bookai.audio import _segments_to_markdown
+
+        segments = [
+            {"start": 0, "end": 5, "text": " Hello world"},
+            {"start": 5.5, "end": 10, "text": " Second sentence"},
+            {"start": 15, "end": 20, "text": " After a gap"},
+        ]
+
+        md = _segments_to_markdown(segments, "Test Audio")
+        assert "# Test Audio" in md
+        assert "Hello world" in md
+        assert "Second sentence" in md
+        assert "[00:00]" in md  # First timestamp
+
+    def test_get_audio_duration(self):
+        """Test getting audio duration with ffprobe."""
+        from bookai.audio import get_audio_duration
+
+        # Non-existent file should return 0
+        assert get_audio_duration("/nonexistent/file.mp3") == 0.0
+
+    def test_transcribe_audio_creates_metadata(self):
+        """Test that transcribe creates proper metadata (using a tiny WAV)."""
+        import struct
+        import wave
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # Create a tiny valid WAV file (0.5s of silence)
+            wav_path = Path(tmp) / "test.wav"
+            with wave.open(str(wav_path), "w") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(16000)
+                # 0.5 seconds of silence
+                frames = struct.pack("<" + "h" * 8000, *([0] * 8000))
+                wf.writeframes(frames)
+
+            # Transcribe the silence (should work without errors)
+            from bookai.audio import transcribe_audio
+
+            metadata, text = transcribe_audio(
+                str(wav_path), model_size="tiny", language="en"
+            )
+            assert metadata.source_format.value == "audio"
+            assert metadata.title == "test"
+
+    def test_convert_file_detects_audio(self):
+        """Test that convert_file routes audio files correctly."""
+        import struct
+        import wave
+
+        with tempfile.TemporaryDirectory() as tmp:
+            wav_path = Path(tmp) / "audiobook.wav"
+            with wave.open(str(wav_path), "w") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(16000)
+                frames = struct.pack("<" + "h" * 8000, *([0] * 8000))
+                wf.writeframes(frames)
+
+            metadata, text = convert_file(str(wav_path))
+            assert metadata.source_format.value == "audio"

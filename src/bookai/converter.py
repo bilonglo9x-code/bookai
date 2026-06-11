@@ -128,10 +128,65 @@ def convert_text(file_path: str) -> tuple[BookMetadata, str]:
     return metadata, text
 
 
-def convert_file(file_path: str) -> tuple[BookMetadata, str]:
+def convert_image(file_path: str, lang: str = "vie+eng") -> tuple[BookMetadata, str]:
+    """Convert image file(s) to Markdown using OCR.
+
+    Supports: PNG, JPG, JPEG, TIFF, BMP.
+    """
+    from .ocr import ocr_image
+
+    return ocr_image(file_path, lang=lang)
+
+
+def convert_images_dir(dir_path: str, lang: str = "vie+eng") -> tuple[BookMetadata, str]:
+    """Convert a directory of images (book pages) to Markdown.
+
+    Images are sorted by name and processed in order.
+    """
+    from .ocr import ocr_images_batch
+
+    path = Path(dir_path)
+    image_exts = {".png", ".jpg", ".jpeg", ".tiff", ".tif", ".bmp", ".webp"}
+    files = sorted(
+        [str(f) for f in path.iterdir() if f.suffix.lower() in image_exts]
+    )
+
+    if not files:
+        raise ValueError(f"No image files found in: {dir_path}")
+
+    return ocr_images_batch(files, lang=lang)
+
+
+def convert_audio(
+    file_path: str, model_size: str = "base", language: str = "vi"
+) -> tuple[BookMetadata, str]:
+    """Convert audio file to Markdown using Whisper transcription.
+
+    Supports: MP3, WAV, M4A, FLAC, OGG, WMA, AAC, OPUS.
+    """
+    from .audio import transcribe_audio
+
+    return transcribe_audio(file_path, model_size=model_size, language=language)
+
+
+def convert_pdf_smart(file_path: str, lang: str = "vie+eng") -> tuple[BookMetadata, str]:
+    """Smart PDF conversion: auto-detect text vs scanned and use appropriate method.
+
+    - Text PDFs: fast text extraction (PyMuPDF)
+    - Scanned PDFs: OCR extraction (Tesseract)
+    """
+    from .ocr import is_scanned_pdf, ocr_pdf
+
+    if is_scanned_pdf(file_path):
+        return ocr_pdf(file_path, lang=lang)
+    return convert_pdf(file_path)
+
+
+def convert_file(file_path: str, ocr_lang: str = "vie+eng") -> tuple[BookMetadata, str]:
     """Auto-detect format and convert to Markdown.
 
-    Supported: .epub, .pdf, .txt, .md
+    Supported: .epub, .pdf, .txt, .md, images (.png, .jpg, .tiff, .bmp),
+               audio (.mp3, .wav, .m4a, .flac, .ogg)
     """
     path = Path(file_path)
     if not path.exists():
@@ -142,11 +197,19 @@ def convert_file(file_path: str) -> tuple[BookMetadata, str]:
     if suffix == ".epub":
         return convert_epub(file_path)
     elif suffix == ".pdf":
-        return convert_pdf(file_path)
+        return convert_pdf_smart(file_path, lang=ocr_lang)
     elif suffix in (".txt", ".md", ".markdown"):
         return convert_text(file_path)
+    elif suffix in (".png", ".jpg", ".jpeg", ".tiff", ".tif", ".bmp", ".webp"):
+        return convert_image(file_path, lang=ocr_lang)
+    elif suffix in (".mp3", ".wav", ".m4a", ".flac", ".ogg", ".wma", ".aac", ".opus"):
+        return convert_audio(file_path)
     else:
-        raise ValueError(f"Unsupported format: {suffix}. Supported: .epub, .pdf, .txt, .md")
+        raise ValueError(
+            f"Unsupported format: {suffix}. "
+            "Supported: .epub, .pdf, .txt, .md, images (.png/.jpg/.tiff/.bmp), "
+            "audio (.mp3/.wav/.m4a/.flac/.ogg)"
+        )
 
 
 def _get_epub_metadata(book: object, field: str) -> str | None:

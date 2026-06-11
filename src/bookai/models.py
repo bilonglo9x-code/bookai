@@ -14,6 +14,8 @@ class SourceFormat(str, Enum):
     PDF = "pdf"
     TEXT = "text"
     MARKDOWN = "markdown"
+    IMAGE = "image"
+    AUDIO = "audio"
 
 
 class ChunkLabel(str, Enum):

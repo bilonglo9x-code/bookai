@@ -17,7 +17,7 @@ from .content_studio import (
     generate_all_with_ai,
     generate_quote_images,
 )
-from .converter import convert_file
+from .converter import convert_audio, convert_file, convert_image, convert_images_dir
 from .models import BookResult, ChunkLabel
 
 app = typer.Typer(
@@ -29,7 +29,9 @@ console = Console()
 
 @app.command()
 def process(
-    file_path: str = typer.Argument(help="Path to book file (.epub, .pdf, .txt, .md)"),
+    file_path: str = typer.Argument(
+        help="Path to book file (.epub, .pdf, .txt, .md, .png, .jpg, .mp3, .wav, ...)"
+    ),
     output: str | None = typer.Option(None, "-o", "--output", help="Output JSON file path"),
     max_chunks: int = typer.Option(100, "--max-chunks", help="Max chunks to analyze"),
     max_tokens: int = typer.Option(500, "--max-tokens", help="Max tokens per chunk"),
@@ -532,3 +534,123 @@ def _display_results(result: BookResult, top_n: int = 10) -> None:
                     border_style="cyan",
                 )
             )
+
+
+@app.command("ocr")
+def ocr_command(
+    file_path: str = typer.Argument(help="Path to image file or directory of images"),
+    output: str | None = typer.Option(None, "-o", "--output", help="Output markdown file"),
+    lang: str = typer.Option("vie+eng", "--lang", help="OCR language (tesseract code)"),
+) -> None:
+    """Extract text from images or scanned documents using OCR.
+
+    Supports single image files (.png, .jpg, .tiff, .bmp) or
+    a directory of images (processed in sorted order as book pages).
+
+    Examples:
+        bookai ocr page.png -o output.md
+        bookai ocr ./book_pages/ -o book.md
+        bookai ocr scan.jpg --lang vie+eng
+    """
+    path = Path(file_path)
+    if not path.exists():
+        console.print(f"[red]Error: Path not found: {file_path}[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"\n[bold blue]🔍 OCR Processing:[/bold blue] {path.name}")
+
+    try:
+        if path.is_dir():
+            metadata, markdown = convert_images_dir(file_path, lang=lang)
+        else:
+            metadata, markdown = convert_image(file_path, lang=lang)
+    except Exception as e:
+        console.print(f"[red]Error during OCR: {e}[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"  Title: [green]{metadata.title}[/green]")
+    console.print(f"  Pages/images: {metadata.chapters}")
+    console.print(f"  Text length: {len(markdown)} chars")
+
+    if output:
+        Path(output).write_text(markdown, encoding="utf-8")
+        console.print(f"\n[green]Saved to: {output}[/green]")
+    else:
+        console.print("\n" + markdown[:2000])
+        if len(markdown) > 2000:
+            console.print(f"\n[dim]... ({len(markdown) - 2000} more characters)[/dim]")
+
+
+@app.command("transcribe")
+def transcribe_command(
+    file_path: str = typer.Argument(help="Path to audio file (.mp3, .wav, .m4a, .flac, ...)"),
+    output: str | None = typer.Option(None, "-o", "--output", help="Output markdown file"),
+    model_size: str = typer.Option(
+        "base", "--model-size", help="Whisper model: tiny, base, small, medium, large"
+    ),
+    language: str = typer.Option("vi", "--language", help="Language code (vi, en, etc.)"),
+    timestamps: bool = typer.Option(
+        False, "--timestamps", help="Include timestamp JSON in output"
+    ),
+) -> None:
+    """Transcribe audio/audiobook to Markdown using Whisper.
+
+    Converts audio files to text with timestamps, suitable for
+    further processing with `process` or direct use.
+
+    Examples:
+        bookai transcribe audiobook.mp3 -o transcript.md
+        bookai transcribe chapter1.m4a --model-size small --language vi
+        bookai transcribe podcast.wav --timestamps -o output.md
+    """
+    path = Path(file_path)
+    if not path.exists():
+        console.print(f"[red]Error: File not found: {file_path}[/red]")
+        raise typer.Exit(1)
+
+    from .audio import is_supported_audio
+
+    if not is_supported_audio(file_path):
+        console.print(
+            f"[red]Error: Unsupported audio format: {path.suffix}[/red]\n"
+            "Supported: .mp3, .wav, .m4a, .flac, .ogg, .wma, .aac, .opus"
+        )
+        raise typer.Exit(1)
+
+    console.print(f"\n[bold blue]🎙️ Transcribing:[/bold blue] {path.name}")
+    console.print(f"  Model: whisper-{model_size}, Language: {language}")
+
+    try:
+        if timestamps:
+            from .audio import transcribe_audio_with_timestamps
+
+            metadata, markdown, ts_data = transcribe_audio_with_timestamps(
+                file_path, model_size=model_size, language=language
+            )
+            console.print(f"  Segments: {len(ts_data)}")
+        else:
+            metadata, markdown = convert_audio(file_path, model_size=model_size, language=language)
+    except Exception as e:
+        console.print(f"[red]Error during transcription: {e}[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"  Title: [green]{metadata.title}[/green]")
+    console.print(f"  Chapters detected: {metadata.chapters}")
+    console.print(f"  Text length: {len(markdown)} chars")
+
+    if output:
+        out_path = Path(output)
+        out_path.write_text(markdown, encoding="utf-8")
+        console.print(f"\n[green]Transcript saved to: {out_path}[/green]")
+
+        # Save timestamps JSON alongside if requested
+        if timestamps:
+            ts_path = out_path.with_suffix(".timestamps.json")
+            ts_path.write_text(
+                json.dumps(ts_data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            console.print(f"[green]Timestamps saved to: {ts_path}[/green]")
+    else:
+        console.print("\n" + markdown[:2000])
+        if len(markdown) > 2000:
+            console.print(f"\n[dim]... ({len(markdown) - 2000} more characters)[/dim]")
