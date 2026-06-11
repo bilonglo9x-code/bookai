@@ -310,6 +310,9 @@ def generate_ai(
     duration: int = typer.Option(
         3, "--duration", help="Target video duration in minutes (1-5)"
     ),
+    storyboard: bool = typer.Option(
+        False, "--storyboard", help="Generate scene prompts for AI video"
+    ),
 ) -> None:
     """Generate premium content using AI rewriting + quote card images.
 
@@ -317,10 +320,13 @@ def generate_ai(
     rewrite and EXPAND book content into natural radio scripts (1-5 min).
     Also renders PNG quote card images ready for Instagram/Pinterest.
 
+    Use --storyboard to generate visual scene prompts for each script,
+    ready for AI video tools (Runway, Pika, Kling, Midjourney).
+
     Examples:
-        bookai generate-ai results.json --base-url https://api.example.com/v1 --duration 3
-        bookai generate-ai results.json --images ./cards --theme warm --duration 5
-        bookai generate-ai results.json -o content.json --images ./output/cards
+        bookai generate-ai results.json --base-url ... --duration 3
+        bookai generate-ai results.json --storyboard --duration 3
+        bookai generate-ai results.json -o content.json --images ./cards
     """
     path = Path(input_json)
     if not path.exists():
@@ -369,6 +375,42 @@ def generate_ai(
                 border_style="cyan",
             ))
 
+    # Storyboard generation (optional)
+    storyboards_data: list[dict] = []
+    if storyboard and pack.radio_scripts:
+        from .content_studio import generate_storyboards_batch
+        console.print(
+            f"\n[bold]🎬 Generating storyboards for "
+            f"{len(pack.radio_scripts)} scripts...[/bold]\n"
+        )
+        sbs = generate_storyboards_batch(
+            pack.radio_scripts,
+            result.metadata,
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+        )
+        for i, sb in enumerate(sbs, 1):
+            scene_lines = []
+            for s in sb.scenes:
+                narr_short = s.narration[:80]
+                scene_lines.append(
+                    f"[cyan]Scene {s.scene_number}[/cyan] "
+                    f"({s.duration_seconds}s)\n"
+                    f"  [dim]Narration:[/dim] {narr_short}...\n"
+                    f"  [green]Visual:[/green] {s.visual_prompt}\n"
+                    f"  [dim]Camera: {s.camera_note}[/dim]"
+                )
+            console.print(Panel(
+                "\n\n".join(scene_lines),
+                title=(
+                    f"Storyboard #{i}: {sb.script_title} "
+                    f"({sb.total_scenes} scenes)"
+                ),
+                border_style="yellow",
+            ))
+            storyboards_data.append(sb.model_dump())
+
     # Quote cards
     if pack.quote_cards and format in ("all", "quote"):
         console.print(f"\n[bold]📸 Quote Cards ({len(pack.quote_cards)}):[/bold]\n")
@@ -416,11 +458,14 @@ def generate_ai(
                 border_style="magenta",
             ))
 
-    # Save output
+    # Save output (include storyboards if generated)
     if output:
         output_path = Path(output)
+        out_data = pack.model_dump()
+        if storyboards_data:
+            out_data["storyboards"] = storyboards_data
         output_path.write_text(
-            json.dumps(pack.model_dump(), ensure_ascii=False, indent=2),
+            json.dumps(out_data, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
         console.print(f"\n[green]Content saved to: {output_path}[/green]")

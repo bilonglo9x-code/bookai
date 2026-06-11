@@ -115,6 +115,46 @@ class Caption:
         }
 
 
+@dataclass
+class Scene:
+    """A single scene in a video storyboard."""
+
+    scene_number: int
+    duration_seconds: str
+    narration: str
+    visual_prompt: str
+    camera_note: str = ""
+
+    def model_dump(self) -> dict:
+        return {
+            "scene_number": self.scene_number,
+            "duration_seconds": self.duration_seconds,
+            "narration": self.narration,
+            "visual_prompt": self.visual_prompt,
+            "camera_note": self.camera_note,
+        }
+
+
+@dataclass
+class Storyboard:
+    """Full video storyboard with scenes for AI video generation."""
+
+    script_title: str
+    total_scenes: int
+    scenes: list[Scene]
+    style_note: str = ""
+    aspect_ratio: str = "9:16"
+
+    def model_dump(self) -> dict:
+        return {
+            "script_title": self.script_title,
+            "total_scenes": self.total_scenes,
+            "scenes": [s.model_dump() for s in self.scenes],
+            "style_note": self.style_note,
+            "aspect_ratio": self.aspect_ratio,
+        }
+
+
 # ---------------------------------------------------------------------------
 # Hashtag helpers
 # ---------------------------------------------------------------------------
@@ -997,6 +1037,183 @@ def ai_rewrite_captions(
             ))
 
     return captions
+
+
+# ---------------------------------------------------------------------------
+# Storyboard / Scene Prompts — AI Video Generation
+# ---------------------------------------------------------------------------
+
+_STORYBOARD_PROMPT = """Bạn là đạo diễn video chuyên phân cảnh cho video sách.
+Từ kịch bản radio dưới đây, hãy chia thành 5-8 cảnh (scenes)
+với mô tả hình ảnh chi tiết để dùng AI tạo video.
+
+KỊCH BẢN:
+---
+{script_text}
+---
+
+TÊN SÁCH: {book_title}
+TÁC GIẢ: {author}
+
+YÊU CẦU mỗi cảnh:
+- scene_number: số thứ tự
+- duration_seconds: thời lượng cảnh (VD: "8-12")
+- narration: phần lời đọc tương ứng cảnh này
+- visual_prompt: mô tả hình ảnh/video chi tiết bằng TIẾNG ANH
+  (dùng cho Runway/Pika/Midjourney/DALL-E)
+  Phong cách: cinematic, moody lighting, book aesthetic
+- camera_note: chuyển động camera (zoom in, pan left, static...)
+
+FORMAT JSON:
+{{
+  "scenes": [
+    {{
+      "scene_number": 1,
+      "duration_seconds": "5-8",
+      "narration": "phần lời đọc cảnh 1",
+      "visual_prompt": "English visual description for AI",
+      "camera_note": "slow zoom in"
+    }}
+  ],
+  "style_note": "ghi chú phong cách chung cho toàn bộ video"
+}}
+
+LƯU Ý:
+- visual_prompt PHẢI bằng tiếng Anh (AI video tools chỉ hiểu English)
+- Phong cách: cinematic, warm/moody lighting, depth of field
+- Thêm chi tiết: màu sắc, ánh sáng, góc quay, đối tượng
+- Cảnh đầu: hook visual (gây chú ý ngay), cảnh cuối: CTA visual
+- Mỗi cảnh 5-15 giây
+- Chỉ trả JSON, không giải thích."""
+
+
+def generate_storyboard(
+    script: RadioScript,
+    metadata: BookMetadata,
+    api_key: str | None = None,
+    model: str = "gpt-4o-mini",
+    base_url: str | None = None,
+) -> Storyboard:
+    """Generate a visual storyboard for a radio script.
+
+    Splits the script into scenes with detailed visual prompts
+    ready for AI video generators (Runway, Pika, Kling, etc).
+    """
+    prompt = _STORYBOARD_PROMPT.format(
+        script_text=script.full_script,
+        book_title=metadata.title,
+        author=metadata.author,
+    )
+
+    try:
+        response_text = _call_llm_for_rewrite(
+            prompt, api_key=api_key, model=model, base_url=base_url
+        )
+        text = response_text.strip()
+        if text.startswith("```"):
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+        data = json.loads(text)
+
+        scenes = []
+        for s in data.get("scenes", []):
+            scenes.append(Scene(
+                scene_number=s.get("scene_number", 0),
+                duration_seconds=str(s.get("duration_seconds", "5-10")),
+                narration=s.get("narration", ""),
+                visual_prompt=s.get("visual_prompt", ""),
+                camera_note=s.get("camera_note", ""),
+            ))
+
+        return Storyboard(
+            script_title=script.title,
+            total_scenes=len(scenes),
+            scenes=scenes,
+            style_note=data.get("style_note", ""),
+        )
+    except Exception:
+        # Fallback: auto-split script into scenes by sentences
+        return _auto_storyboard(script, metadata)
+
+
+def _auto_storyboard(
+    script: RadioScript, metadata: BookMetadata
+) -> Storyboard:
+    """Fallback storyboard: split script into scenes by paragraphs."""
+    scenes: list[Scene] = []
+    parts = [script.hook, script.body, script.cta]
+    labels = ["hook", "body", "cta"]
+
+    scene_num = 1
+    for part, label in zip(parts, labels):
+        sentences = _split_complete_sentences(part)
+        # Group sentences into scenes of ~2-3 sentences each
+        chunk_size = 3 if label == "body" else 2
+        for i in range(0, len(sentences), chunk_size):
+            group = sentences[i:i + chunk_size]
+            narration = ' '.join(group)
+            words = len(narration.split())
+            dur = max(5, int(words / 2.5))
+
+            if label == "hook" and scene_num == 1:
+                visual = (
+                    "Close-up of an old book opening slowly, "
+                    "warm golden light, dust particles floating, "
+                    "cinematic depth of field"
+                )
+                camera = "slow zoom in"
+            elif label == "cta":
+                visual = (
+                    f"Book cover of '{metadata.title}' by "
+                    f"{metadata.author}, elegant display, "
+                    "soft spotlight, purchase button overlay"
+                )
+                camera = "static with subtle glow"
+            else:
+                visual = (
+                    "Silhouette of person contemplating, "
+                    "moody atmospheric lighting, "
+                    "abstract bokeh background, cinematic"
+                )
+                camera = "slow pan right"
+
+            scenes.append(Scene(
+                scene_number=scene_num,
+                duration_seconds=f"{dur-2}-{dur+2}",
+                narration=narration,
+                visual_prompt=visual,
+                camera_note=camera,
+            ))
+            scene_num += 1
+
+    return Storyboard(
+        script_title=script.title,
+        total_scenes=len(scenes),
+        scenes=scenes,
+        style_note=(
+            "Cinematic, moody warm lighting, depth of field. "
+            "Book/reading aesthetic. 9:16 vertical for TikTok."
+        ),
+    )
+
+
+def generate_storyboards_batch(
+    scripts: list[RadioScript],
+    metadata: BookMetadata,
+    api_key: str | None = None,
+    model: str = "gpt-4o-mini",
+    base_url: str | None = None,
+) -> list[Storyboard]:
+    """Generate storyboards for a batch of radio scripts."""
+    storyboards: list[Storyboard] = []
+    for script in scripts:
+        sb = generate_storyboard(
+            script, metadata,
+            api_key=api_key, model=model, base_url=base_url,
+        )
+        storyboards.append(sb)
+    return storyboards
 
 
 # ---------------------------------------------------------------------------
