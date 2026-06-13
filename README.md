@@ -2,15 +2,21 @@
 
 AI-powered pipeline to convert books into affiliate marketing content.
 
-**Pipeline:** `Book file → Markdown → Semantic chunks → AI analysis → Content ready for TikTok/IG/Blog`
+**Pipeline:** `Book (PDF/EPUB/ảnh/audio) → Markdown → Chunks → AI Analysis → Content Studio → Ready-to-post`
 
-## Features (MVP-1)
+## Features
 
-- **Multi-format converter**: EPUB, PDF (text), TXT, Markdown → normalized Markdown
-- **Semantic chunking**: Chapter-aware splitting with configurable token bounds
-- **AI analysis**: Labels each chunk (quote, hook, tip, story, insight, etc.) + viral score (0-10)
-- **Multiple providers**: OpenAI, Anthropic, or mock (offline testing)
-- **CLI interface**: Rich-formatted output with tables and panels
+- **Multi-format input**: EPUB, PDF (text + scan/OCR), images, audio (Whisper)
+- **Semantic chunking**: Chapter-aware splitting (1200 tokens), Vietnamese-optimized
+- **AI analysis**: 8 labels + viral score (0-10) + summary + reason
+- **Content Studio**:
+  - Radio scripts (1-5 phút, AI viết lại + mở rộng)
+  - Quote cards (text + PNG 1080x1080)
+  - Listicles/carousel
+  - TikTok captions (SEO optimized)
+  - Storyboard/phân cảnh cho AI video (visual prompts tiếng Anh)
+- **Multiple providers**: OpenAI, Anthropic, custom API, hoặc mock (offline)
+- **CLI interface**: Rich-formatted output
 
 ## Installation
 
@@ -21,41 +27,63 @@ pip install -e .
 pip install -e ".[dev]"
 ```
 
-## Usage
+## Quick Start
 
-### Full pipeline (convert → chunk → analyze)
 ```bash
-# With mock provider (no API key needed, heuristic-based)
-bookai process book.epub
+# Full pipeline (convert → chunk → analyze)
+bookai process book.epub --provider mock
+bookai process book.pdf --provider custom \
+  --base-url https://api.example.com/v1 \
+  --model model-name --api-key $API_KEY \
+  --batch -o results.json
 
-# With OpenAI
-export OPENAI_API_KEY=sk-...
-bookai process book.epub --provider openai --top 20
+# Generate content (template-based, offline)
+bookai generate results.json -o content.json
 
-# With Anthropic
-export ANTHROPIC_API_KEY=sk-ant-...
-bookai process book.pdf --provider anthropic --model claude-sonnet-4-20250514
-```
+# Generate content (AI rewrite, 3 phút mỗi video)
+bookai generate-ai results.json \
+  --base-url https://api.example.com/v1 \
+  --model model-name --api-key $API_KEY \
+  --duration 3 --storyboard -o content.json
 
-### Convert only
-```bash
+# Render quote card images (1080x1080 PNG)
+bookai render-quotes results.json -o ./cards --theme warm
+
+# Convert only
 bookai convert book.epub -o output.md
-bookai convert scan.pdf -o output.md
+
+# OCR (scanned PDF or images)
+bookai ocr scan.pdf -o output.md --lang vie+eng
+bookai ocr ./book_pages/ -o book.md
+
+# Transcribe audio
+bookai transcribe audiobook.mp3 -o transcript.md
 ```
 
-### View chunks
-```bash
-bookai chunks book.epub --max-tokens 300 --show 20
-```
+## CLI Commands
 
-### Export results to JSON
-```bash
-bookai process book.epub -o results.json --provider openai
-```
+| Command | Description |
+|---------|-------------|
+| `process` | Full pipeline: convert → chunk → analyze |
+| `convert` | Convert file to markdown |
+| `chunks` | View chunks from a file |
+| `generate` | Generate content (template-based) |
+| `generate-ai` | Generate content (AI rewrite + storyboard) |
+| `render-quotes` | Render PNG quote card images |
+| `ocr` | OCR scanned PDF or images |
+| `transcribe` | Transcribe audio file |
+
+## Content Types Generated
+
+| Type | Description | Platform |
+|------|-------------|----------|
+| **Radio Script** | Hook → Body → CTA (1-5 phút) | TikTok, YouTube |
+| **Quote Card** | Câu trích + caption + PNG | Instagram, Pinterest |
+| **Listicle** | "X bài học từ [sách]" | Instagram carousel |
+| **Caption** | SEO keyword + hashtag | TikTok |
+| **Storyboard** | Visual prompts per scene | Runway, Pika, Kling |
 
 ## Content Labels
-
-Each chunk is classified with one or more labels:
 
 | Label | Description |
 |-------|-------------|
@@ -68,26 +96,40 @@ Each chunk is classified with one or more labels:
 | `tip` | Actionable tips |
 | `controversial` | Debate-worthy statements |
 
-## Viral Score
+## Project Structure
 
-Each chunk gets a score from 0-10 based on:
-- **Curiosity** (+2): Information gap that makes you want to know more
-- **Emotion** (+2): Triggers strong feelings (surprise, fear, joy)
-- **Actionable** (+2): Reader can apply immediately
-- **Controversy** (+2): Sparks debate and comments
-- **Relatability** (+2): Everyone sees themselves in it
+```
+src/bookai/
+├── models.py          # Pydantic data models
+├── converter.py       # EPUB/PDF/TXT → Markdown
+├── chunker.py         # Semantic chunking (chapter-aware)
+├── analyzer.py        # AI analysis (labels + viral score)
+├── content_studio.py  # Content generation engine
+├── quote_renderer.py  # PNG quote card renderer
+├── audio.py           # Whisper transcription
+├── ocr.py             # Tesseract OCR
+└── cli.py             # Typer CLI
+docs/
+├── PLAN.md            # Full roadmap + ideas + strategies
+└── ARCHITECTURE.md    # Technical architecture details
+AGENTS.md              # Guide for AI IDEs to continue development
+```
 
 ## Roadmap
 
-- [x] **MVP-1**: EPUB/PDF/TXT → Markdown → Chunk → AI Analysis
-- [ ] **MVP-2**: OCR (PDF scan/images) + Whisper (audio/audiobooks)
-- [ ] **MVP-3**: Content Studio (TTS + video render + quote cards + captions)
-- [ ] **MVP-4**: Dashboard + auto-scheduling + affiliate link management
+- [x] **MVP-1**: Core pipeline (EPUB/PDF → Markdown → Chunk → AI Analysis)
+- [x] **MVP-2**: OCR (scan PDF/images) + Whisper (audio)
+- [x] **MVP-3**: Content Studio (radio scripts, quotes, listicles, storyboard)
+- [ ] **MVP-4**: TTS + Video render + Affiliate links
+- [ ] **MVP-5**: Dashboard + Auto-post + Content Calendar
+- [ ] **MVP-6**: Vector DB + A/B testing + Scale
+
+See `docs/PLAN.md` for detailed roadmap and strategies.
 
 ## Development
 
 ```bash
-# Run tests
+# Run tests (58 tests)
 pytest
 
 # Lint
