@@ -35,6 +35,7 @@ from bookai.analyzer import analyze_chunks
 from bookai.chunker import chunk_markdown
 from bookai.content_studio import generate_all, generate_all_with_ai
 from bookai.converter import convert_file
+from bookai.library import BookLibrary, PromptManager
 from bookai.models import BookResult, ChunkLabel
 
 # ---------------------------------------------------------------------------
@@ -94,6 +95,8 @@ def _init_state() -> None:
         "calendar_entries": [],
         "tts_results": {},
         "processing": False,
+        "_library": None,
+        "_prompt_mgr": None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -101,6 +104,18 @@ def _init_state() -> None:
 
 
 _init_state()
+
+
+def _get_library() -> BookLibrary:
+    if st.session_state._library is None:
+        st.session_state._library = BookLibrary()
+    return st.session_state._library
+
+
+def _get_prompt_mgr() -> PromptManager:
+    if st.session_state._prompt_mgr is None:
+        st.session_state._prompt_mgr = PromptManager()
+    return st.session_state._prompt_mgr
 
 
 # ---------------------------------------------------------------------------
@@ -167,11 +182,13 @@ with st.sidebar:
 # Main tabs
 # ---------------------------------------------------------------------------
 
-tab_upload, tab_analyze, tab_content, tab_calendar, tab_export = st.tabs([
+tab_upload, tab_analyze, tab_content, tab_calendar, tab_library, tab_prompts, tab_export = st.tabs([
     "📖 Upload & Process",
     "📊 Phân tích",
     "🎬 Content Studio",
     "📅 Lịch đăng",
+    "📚 Thư viện sách",
+    "🔧 Prompt",
     "📦 Export",
 ])
 
@@ -327,6 +344,13 @@ with tab_upload:
             )
             st.session_state.book_result = result
             st.session_state.content_pack = None
+
+            # ── Auto-save to library ──────────────────────────
+            try:
+                lib = _get_library()
+                lib.save_book(result)
+            except Exception:
+                pass  # library save failure should not break main flow
 
             progress.progress(100)
             _tick()
@@ -1014,3 +1038,195 @@ with tab_export:
         key_api = your_api_key_here
         ```
         """)
+
+
+# ===========================================================================
+# TAB 5 — Thư viện sách
+# ===========================================================================
+
+with tab_library:
+    lib = _get_library()
+    st.header("📚 Thư viện sách")
+
+    stats = lib.stats()
+    if stats["total"] == 0:
+        st.info("Chưa có sách nào. Upload và phân tích sách ở tab **Upload & Process** — sẽ tự động lưu vào thư viện.")
+    else:
+        # ── Stats bar ──────────────────────────────────────────
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("📚 Tổng sách", stats["total"])
+        c2.metric("🔬 Tổng chunks", stats["total_chunks"])
+        c3.metric("⚡ Avg score", f"{stats['avg_score']:.1f}/10")
+        c4.metric("🎬 Có content", stats["with_content"])
+
+        st.divider()
+
+        # ── Search ─────────────────────────────────────────────
+        search_q = st.text_input("🔍 Tìm kiếm", placeholder="Tên sách hoặc tác giả...")
+        sort_col = st.selectbox(
+            "Sắp xếp theo",
+            ["analyzed_at", "avg_viral_score", "top_score", "chunks_analyzed", "title"],
+            format_func=lambda x: {
+                "analyzed_at": "📅 Ngày phân tích",
+                "avg_viral_score": "⚡ Avg score",
+                "top_score": "🔥 Top score",
+                "chunks_analyzed": "📄 Số chunks",
+                "title": "🔤 Tên sách",
+            }.get(x, x),
+        )
+
+        entries = lib.search(search_q) if search_q else lib.list_books(sort_by=sort_col)
+
+        st.caption(f"Hiển thị {len(entries)} sách")
+
+        # ── Book cards ─────────────────────────────────────────
+        for entry in entries:
+            with st.container():
+                col_info, col_score, col_actions = st.columns([4, 2, 2])
+
+                with col_info:
+                    st.markdown(f"**{entry.title}**")
+                    st.caption(
+                        f"👤 {entry.author or '—'} | "
+                        f"📄 {entry.source_format} | "
+                        f"🕐 {entry.analyzed_at_display}"
+                    )
+                    if entry.label_counts:
+                        top_labels = sorted(
+                            entry.label_counts.items(), key=lambda x: -x[1]
+                        )[:4]
+                        st.caption("  ".join(f"`{k}×{v}`" for k, v in top_labels))
+                    if entry.notes:
+                        st.caption(f"📝 {entry.notes}")
+
+                with col_score:
+                    score_color = (
+                        "🟢" if entry.avg_viral_score >= 7
+                        else "🟡" if entry.avg_viral_score >= 4
+                        else "🔴"
+                    )
+                    st.metric(
+                        "Avg Score",
+                        f"{score_color} {entry.avg_viral_score:.1f}",
+                        f"Top: {entry.top_score:.1f}",
+                    )
+                    st.caption(
+                        f"{entry.chunks_analyzed} chunks | "
+                        f"{'🎬 Content' if entry.has_content else '—'}"
+                    )
+
+                with col_actions:
+                    if st.button("📂 Load", key=f"load_{entry.slug}", use_container_width=True):
+                        result = lib.load_result(entry.slug)
+                        if result:
+                            st.session_state.book_result = result
+                            st.session_state.content_pack = None
+                            st.success(f"✅ Đã load: **{entry.title}**")
+                            st.rerun()
+                        else:
+                            st.error("Không tìm thấy file results.json")
+
+                    if entry.has_content:
+                        if st.button("🎬 Load Content", key=f"loadc_{entry.slug}", use_container_width=True):
+                            content_data = lib.load_content(entry.slug)
+                            if content_data:
+                                st.session_state._pending_content = content_data
+                                st.info("Content loaded — chuyển sang tab Content Studio")
+
+                    if st.button("🗑️ Xóa", key=f"del_{entry.slug}", use_container_width=True, type="secondary"):
+                        lib.delete_book(entry.slug)
+                        st.success(f"Đã xóa: {entry.title}")
+                        st.rerun()
+
+                st.divider()
+
+
+# ===========================================================================
+# TAB 6 — Prompt Manager
+# ===========================================================================
+
+with tab_prompts:
+    pm = _get_prompt_mgr()
+    st.header("🔧 Quản lý Prompt")
+    st.caption(
+        "Tùy chỉnh các prompt AI dùng cho phân tích và tạo content. "
+        "Thay đổi sẽ áp dụng ngay lần chạy tiếp theo."
+    )
+
+    prompts = pm.list_prompts()
+
+    for p in prompts:
+        key = p["key"]
+        is_custom = p["is_custom"]
+        label = f"{'🟠 Đã tùy chỉnh' if is_custom else '⚪ Mặc định'} — {p['name']}"
+
+        with st.expander(label, expanded=False):
+            st.caption(p["description"])
+
+            edited = st.text_area(
+                "Template",
+                value=p["template"],
+                height=300,
+                key=f"prompt_{key}",
+                help="Dùng {variable} cho các biến động. Xem mô tả để biết biến nào có sẵn.",
+            )
+
+            col_save, col_reset, col_test = st.columns([1, 1, 2])
+            with col_save:
+                if st.button("💾 Lưu", key=f"save_{key}", use_container_width=True):
+                    pm.set(key, edited)
+                    st.success("✅ Đã lưu")
+
+            with col_reset:
+                if is_custom:
+                    if st.button("↩️ Reset", key=f"reset_{key}", use_container_width=True):
+                        pm.reset(key)
+                        st.success("Reset về mặc định")
+                        st.rerun()
+
+            with col_test:
+                if key == "analysis" and st.session_state.book_result:
+                    if st.button(
+                        "🧪 Test trên chunk đầu tiên",
+                        key=f"test_{key}",
+                        use_container_width=True,
+                    ):
+                        r = st.session_state.book_result
+                        if r.chunks:
+                            sample = r.chunks[0].text[:300]
+                            rendered = edited.replace("{text}", sample)
+                            st.code(rendered, language=None)
+
+    st.divider()
+    st.subheader("⚙️ Cài đặt nâng cao")
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button("↩️ Reset tất cả về mặc định", type="secondary", use_container_width=True):
+            pm.reset_all()
+            st.success("Đã reset tất cả prompts về mặc định")
+            st.rerun()
+    with col_b:
+        # Export prompts
+        prompts_export = {p["key"]: p["template"] for p in pm.list_prompts()}
+        st.download_button(
+            "⬇️ Export prompts.json",
+            data=json.dumps(prompts_export, ensure_ascii=False, indent=2).encode("utf-8"),
+            file_name="bookai_prompts.json",
+            mime="application/json",
+            use_container_width=True,
+        )
+
+    # Import prompts
+    st.subheader("📥 Import prompts")
+    prompt_file = st.file_uploader("Upload prompts.json", type=["json"], key="import_prompts")
+    if prompt_file:
+        try:
+            imported = json.loads(prompt_file.getvalue().decode("utf-8"))
+            for k, v in imported.items():
+                if isinstance(v, str):
+                    pm.set(k, v)
+            st.success(f"✅ Imported {len(imported)} prompts")
+            st.rerun()
+        except Exception as e:
+            st.error(f"❌ {e}")
