@@ -209,36 +209,114 @@ with tab_upload:
             tmp.write(uploaded.getvalue())
             tmp_path = tmp.name
 
-        progress = st.progress(0, text="Đang convert...")
-        status = st.empty()
+        # ── Progress UI ──────────────────────────────────────
+        st.markdown("---")
+        st.markdown("### ⚙️ Đang xử lý...")
+        col_prog, col_time = st.columns([4, 1])
+        progress = col_prog.progress(0)
+        timer_txt = col_time.empty()
+
+        step_box   = st.empty()   # current step description
+        detail_box = st.empty()   # detail / chunk counter
+        log_box    = st.expander("📋 Chi tiết log", expanded=False)
+        logs: list[str] = []
+
+        import time as _time
+        t_start = _time.time()
+
+        def _tick():
+            elapsed = _time.time() - t_start
+            timer_txt.caption(f"⏱ {elapsed:.0f}s")
+
+        def _log(msg: str):
+            logs.append(msg)
+            with log_box:
+                st.text("\n".join(logs[-20:]))
 
         try:
-            # Step 1: Convert
-            status.info("⚙️ Converting file...")
-            metadata, markdown = convert_file(tmp_path)
-            progress.progress(25, text="Convert xong")
+            # ── Step 1: Convert ──────────────────────────────
+            step_box.info("**Bước 1/3** — 📖 Đang đọc và convert file...")
+            detail_box.caption(f"File: `{uploaded.name}` ({uploaded.size/1024:.0f} KB)")
+            progress.progress(5)
+            _log(f"[Convert] {uploaded.name}")
 
-            # Step 2: Chunk
-            status.info("✂️ Chunking...")
+            metadata, markdown = convert_file(tmp_path)
+            progress.progress(20)
+            _tick()
+            _log(f"[Convert OK] title={metadata.title} chapters={metadata.chapters} chars={len(markdown)}")
+            detail_box.caption(
+                f"📚 **{metadata.title}** — {metadata.author} | "
+                f"{metadata.chapters} chương | {len(markdown):,} ký tự"
+            )
+
+            # ── Step 2: Chunk ─────────────────────────────────
+            step_box.info("**Bước 2/3** — ✂️ Đang tách thành chunks...")
+            progress.progress(25)
+            _log(f"[Chunk] max_tokens={max_tokens}")
+
             chunk_list = chunk_markdown(
                 markdown, book_title=metadata.title, max_tokens=max_tokens
             )
-            progress.progress(50, text=f"Đã tách {len(chunk_list)} chunks")
-
-            # Step 3: Analyze
             to_analyze = chunk_list[:max_chunks]
-            status.info(f"🤖 Đang phân tích {len(to_analyze)} chunks ({provider_key})...")
-
-            analyzed = analyze_chunks(
-                to_analyze,
-                provider=provider_key,
-                api_key=api_key or None,
-                model=model,
-                base_url=base_url or None,
+            progress.progress(35)
+            _tick()
+            _log(f"[Chunk OK] total={len(chunk_list)} → analyzing={len(to_analyze)}")
+            detail_box.caption(
+                f"✂️ {len(chunk_list)} chunks tổng | "
+                f"Sẽ phân tích **{len(to_analyze)}** chunks đầu tiên"
             )
-            progress.progress(90, text="Phân tích xong")
 
-            # Build result
+            # ── Step 3: Analyze chunk-by-chunk ───────────────
+            step_box.info(
+                f"**Bước 3/3** — 🤖 Đang phân tích AI "
+                f"(**{len(to_analyze)}** chunks, provider: `{provider_key}`)..."
+            )
+            _log(f"[Analyze] provider={provider_key} model={model} chunks={len(to_analyze)}")
+
+            analyzed: list = []
+            chunk_counter = st.empty()
+            prog_start = 35
+            prog_end   = 90
+
+            if provider_key == "mock":
+                # Mock: fast, show per-chunk progress
+                from bookai.analyzer import _mock_analyze
+                for i, chunk in enumerate(to_analyze):
+                    result_chunk = _mock_analyze(chunk)
+                    analyzed.append(result_chunk)
+                    pct = prog_start + int((i + 1) / len(to_analyze) * (prog_end - prog_start))
+                    progress.progress(pct)
+                    _tick()
+                    chunk_counter.markdown(
+                        f"🔍 Chunk **{i+1}/{len(to_analyze)}** | "
+                        f"Score: `{result_chunk.viral_score:.1f}` | "
+                        f"Labels: `{'  '.join(l.value for l in result_chunk.labels)}`"
+                    )
+                    if (i + 1) % 5 == 0 or i == len(to_analyze) - 1:
+                        _log(f"  [{i+1}/{len(to_analyze)}] score={result_chunk.viral_score:.1f}")
+            else:
+                # Real API: analyze all then update
+                chunk_counter.markdown(
+                    f"⏳ Đang gửi **{len(to_analyze)}** chunks tới `{provider_key}` API..."
+                )
+                analyzed = analyze_chunks(
+                    to_analyze,
+                    provider=provider_key,
+                    api_key=api_key or None,
+                    model=model,
+                    base_url=base_url or None,
+                )
+                progress.progress(prog_end)
+                _tick()
+                avg = sum(a.viral_score for a in analyzed) / len(analyzed) if analyzed else 0
+                chunk_counter.markdown(
+                    f"✅ Đã nhận **{len(analyzed)}** kết quả | "
+                    f"Avg score: `{avg:.1f}/10`"
+                )
+                _log(f"[Analyze OK] {len(analyzed)} results avg_score={avg:.1f}")
+
+            # ── Build result ──────────────────────────────────
+            progress.progress(95)
             result = BookResult(
                 metadata=metadata,
                 markdown=markdown,
@@ -248,16 +326,34 @@ with tab_upload:
                 top_hooks=[a for a in analyzed if ChunkLabel.HOOK in a.labels],
             )
             st.session_state.book_result = result
-            st.session_state.content_pack = None  # reset content
+            st.session_state.content_pack = None
 
-            progress.progress(100, text="Hoàn thành!")
-            status.success(
-                f"✅ **{metadata.title}** — {len(analyzed)} chunks đã phân tích"
-            )
+            progress.progress(100)
+            _tick()
+
+            # ── Summary card ──────────────────────────────────
+            elapsed = _time.time() - t_start
+            avg_score = sum(a.viral_score for a in analyzed) / len(analyzed) if analyzed else 0
+            high = sum(1 for a in analyzed if a.viral_score >= 7)
+            step_box.empty()
+            detail_box.empty()
+            chunk_counter.empty()
+
+            st.success(f"✅ Hoàn thành trong **{elapsed:.0f}s** — `{metadata.title}`")
+            mc1, mc2, mc3, mc4 = st.columns(4)
+            mc1.metric("📄 Chunks", len(analyzed))
+            mc2.metric("⚡ Avg Score", f"{avg_score:.1f}/10")
+            mc3.metric("🔥 High (≥7)", high)
+            mc4.metric("⏱ Thời gian", f"{elapsed:.0f}s")
+            st.caption("👉 Chuyển sang tab **Phân tích** để xem chi tiết")
+            _log(f"[Done] elapsed={elapsed:.0f}s avg={avg_score:.1f} high={high}")
 
         except Exception as e:
             progress.empty()
-            st.error(f"❌ Lỗi: {e}")
+            step_box.error(f"❌ Lỗi: {e}")
+            _log(f"[ERROR] {e}")
+            import traceback
+            _log(traceback.format_exc()[-500:])
         finally:
             Path(tmp_path).unlink(missing_ok=True)
 
