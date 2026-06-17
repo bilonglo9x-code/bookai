@@ -1,0 +1,29 @@
+[server]
+# Tắt file watcher — quan trọng nhất, ngăn Streamlit re-run liên tục
+fileWatcherType = "none"
+runOnSave = false
+headless = true
+address = "0.0.0.0"
+port = 8501
+maxUploadSize = 200
+enableCORS = false
+enableXsrfProtection = false
+
+[browser]
+# Tắt telemetry và stats
+gatherUsageStats = false
+serverAddress = "localhost"
+serverPort = 8501
+
+[client]
+# Tắt toolbar để giao diện gọn hơn
+toolbarMode = "minimal"
+showErrorDetails = false
+
+[runner]
+# Tắt magic commands (nhanh hơn một chút)
+magicEnabled = false
+fastReruns = true
+
+[logger]
+level = "warning"
