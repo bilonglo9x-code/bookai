@@ -1,0 +1,57 @@
+name: CD — Auto Deploy to VPS
+
+on:
+  push:
+    branches: [initial-setup]
+  workflow_dispatch:          # Allow manual trigger from GitHub UI
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production   # Requires env protection rules if desired
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Notify deploy start
+        run: echo "Deploying commit ${{ github.sha }} to VPS..."
+
+      - name: Deploy via Admin API
+        env:
+          VPS_URL: ${{ secrets.VPS_URL }}          # e.g. http://104.207.75.43
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}  # VPS_ADMIN_TOKEN value
+        run: |
+          echo "→ Triggering deploy on VPS..."
+          RESPONSE=$(curl -s -X POST \
+            -H "Authorization: Bearer $ADMIN_TOKEN" \
+            -H "Content-Type: application/json" \
+            --max-time 180 \
+            "$VPS_URL/admin/deploy")
+
+          echo "Response: $RESPONSE"
+
+          # Check if deploy succeeded
+          OK=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('ok', False))" 2>/dev/null || echo "False")
+          if [ "$OK" = "True" ]; then
+            echo "✅ Deploy OK!"
+          else
+            echo "❌ Deploy failed!"
+            echo "$RESPONSE" | python3 -m json.tool || true
+            exit 1
+          fi
+
+      - name: Health check
+        env:
+          VPS_URL: ${{ secrets.VPS_URL }}
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          sleep 5
+          echo "→ Health check..."
+          RESPONSE=$(curl -s -H "Authorization: Bearer $ADMIN_TOKEN" "$VPS_URL/admin/health")
+          OK=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('ok', False))" 2>/dev/null || echo "False")
+          if [ "$OK" = "True" ]; then
+            echo "✅ Service healthy!"
+          else
+            echo "⚠️ Service may not be healthy:"
+            echo "$RESPONSE"
+          fi
