@@ -27,12 +27,15 @@ chạy nhiều kênh song song, gắn affiliate link Shopee/TikTok Shop/Tiki.
   - Storyboard/phân cảnh minh họa (visual prompts cho AI video)
   - Quote card PNG renderer (1080x1080, 4 themes)
 
+### MVP-4 — Đã triển khai:
+- **Affiliate link layer** (`affiliate.py`): AffiliateManager, BookLinks, sub-ID tracking, inject vào ContentPack
+- **TTS** (`tts.py`): Edge-TTS giọng Việt (HoaiMyNeural / NamMinhNeural), async batch synthesis
+- **Video render** (`video_render.py`): FFmpeg, render_radio_video / render_quote_video / render_slideshow_video, 1080×1920
+- **Content Calendar** (`calendar.py`): 30-day 4-week strategy, CSV + JSON export
+
 ### Chưa triển khai (xem `docs/PLAN.md`):
-- TTS + Video render tự động
-- Affiliate link layer (Shopee/Tiki/TikTok Shop)
-- Content Calendar (lịch đăng 30 ngày)
 - Auto-post đa nền tảng
-- Dashboard/Frontend (Web UI)
+- Dashboard/Frontend (Web UI — Streamlit đề xuất cho MVP nhanh)
 - Vector DB (pgvector)
 - Blog/SEO generator
 - A/B test hooks
@@ -50,10 +53,16 @@ src/bookai/
 ├── quote_renderer.py  # PIL-based PNG quote card renderer
 ├── audio.py           # Whisper transcription
 ├── ocr.py             # Tesseract OCR for scanned PDFs/images
-├── cli.py             # Typer CLI: process, generate, generate-ai, render-quotes
+├── affiliate.py       # MVP-4: Affiliate link manager (Shopee/TikTok/Tiki + sub-ID)
+├── tts.py             # MVP-4: Edge-TTS Vietnamese voiceover synthesis
+├── video_render.py    # MVP-4: FFmpeg video rendering (1080×1920 MP4)
+├── calendar.py        # MVP-4: 30-day content posting calendar (CSV/JSON)
+├── cli.py             # Typer CLI: process, generate, generate-ai, render-quotes,
+│                      #            affiliate, tts, render-video, calendar
 └── __init__.py
 tests/
-└── test_bookai.py     # 58 tests (pytest)
+├── test_bookai.py     # 58 tests (original)
+└── test_mvp4.py       # 55 tests (MVP-4 modules)
 docs/
 ├── PLAN.md            # Lộ trình chi tiết + ý tưởng
 └── ARCHITECTURE.md    # Kiến trúc kỹ thuật chi tiết

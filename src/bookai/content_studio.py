@@ -1302,3 +1302,168 @@ def generate_all_with_ai(
         listicles=listicles,
         captions=captions,
     )
+
+
+# ---------------------------------------------------------------------------
+# Series Cliffhanger Splitter
+# ---------------------------------------------------------------------------
+
+_CLIFFHANGER_TEMPLATES = [
+    "Phần tiếp theo còn shock hơn — đừng bỏ lỡ! 👇",
+    "Bài học tiếp theo mới thật sự bất ngờ... Follow để không bỏ lỡ nhé!",
+    "Nhưng đó chưa phải điều hay nhất — phần sau mới thật sự đáng xem!",
+    "Tiếp tục xem phần {n} để biết điều quan trọng nhất! 🔥",
+    "Comment 'tiếp' để xem phần {n} — còn hay hơn nhiều!",
+    "Save lại xem phần tiếp theo — bạn sẽ không tin được đâu!",
+    "Phần {n}: Bí mật cuối cùng mà ít ai biết... 👀",
+]
+
+_HOOK_RECAP_TEMPLATES = [
+    "Hôm qua tôi đã chia sẻ về {prev_topic}. Hôm nay tiếp tục với phần {n}...",
+    "Tiếp tục series về {book_title}. Phần {n} hôm nay:",
+    "Nếu bạn chưa xem phần trước, hãy xem lại trước. Còn đây là phần {n}:",
+    "Series {book_title} — Phần {n}:",
+]
+
+
+@dataclass
+class SeriesVideo:
+    """One video in a cliffhanger series."""
+
+    series_title: str
+    part_number: int
+    total_parts: int
+    hook: str          # Opening hook / recap
+    body: str          # Main content
+    cliffhanger: str   # Closing cliffhanger line
+    hashtags: list[str] = field(default_factory=list)
+    source_script_title: str = ""
+    estimated_seconds: int = 0
+
+    @property
+    def full_script(self) -> str:
+        return f"{self.hook}\n\n{self.body}\n\n{self.cliffhanger}"
+
+    def model_dump(self) -> dict:
+        return {
+            "type": "series_video",
+            "series_title": self.series_title,
+            "part_number": self.part_number,
+            "total_parts": self.total_parts,
+            "hook": self.hook,
+            "body": self.body,
+            "cliffhanger": self.cliffhanger,
+            "full_script": self.full_script,
+            "hashtags": self.hashtags,
+            "source_script_title": self.source_script_title,
+            "estimated_seconds": self.estimated_seconds,
+        }
+
+
+def split_script_to_series(
+    script: RadioScript,
+    parts: int = 5,
+    target_seconds: int = 75,
+    book_title: str = "",
+) -> list[SeriesVideo]:
+    """Split a long RadioScript into a series of shorter videos with cliffhangers.
+
+    Strategy:
+        - Hook of original script → Part 1 opener
+        - Body split evenly across all parts
+        - CTA only in last part
+        - Each part ends with a cliffhanger (except last)
+
+    Args:
+        script: Source RadioScript (ideally 3-5 min).
+        parts: Number of series videos (3-7 recommended).
+        target_seconds: Target duration per video in seconds (default 75s).
+        book_title: Used in recap hooks.
+
+    Returns:
+        List of SeriesVideo, one per part.
+    """
+    import random
+
+    series_title = script.title or f"Series từ {book_title}"
+    body_sentences = _split_complete_sentences(script.body)
+    if not body_sentences:
+        body_sentences = [script.body]
+
+    # Distribute sentences across parts
+    n_sentences = len(body_sentences)
+    sentences_per_part = max(1, n_sentences // parts)
+    buckets: list[list[str]] = []
+    for i in range(parts):
+        start = i * sentences_per_part
+        end = start + sentences_per_part if i < parts - 1 else n_sentences
+        buckets.append(body_sentences[start:end])
+
+    videos: list[SeriesVideo] = []
+    bt = book_title or script.title or "cuốn sách"
+
+    for i, bucket in enumerate(buckets):
+        part_num = i + 1
+        body = " ".join(bucket)
+
+        # Hook / opener
+        if part_num == 1:
+            hook = script.hook
+        else:
+            tmpl = _HOOK_RECAP_TEMPLATES[i % len(_HOOK_RECAP_TEMPLATES)]
+            prev_body = " ".join(buckets[i - 1])[:60]
+            hook = tmpl.format(
+                prev_topic=prev_body + "...",
+                book_title=bt,
+                n=part_num,
+            )
+
+        # Cliffhanger (not for last part)
+        if part_num < parts:
+            cf_tmpl = _CLIFFHANGER_TEMPLATES[i % len(_CLIFFHANGER_TEMPLATES)]
+            cliffhanger = cf_tmpl.format(n=part_num + 1)
+        else:
+            cliffhanger = script.cta  # Last part uses original CTA
+
+        estimated = _estimate_read_seconds(f"{hook}\n{body}\n{cliffhanger}")
+
+        videos.append(SeriesVideo(
+            series_title=series_title,
+            part_number=part_num,
+            total_parts=parts,
+            hook=hook,
+            body=body,
+            cliffhanger=cliffhanger,
+            hashtags=list(script.hashtags) + [f"phan{part_num}", f"series"],
+            source_script_title=script.title,
+            estimated_seconds=estimated,
+        ))
+
+    return videos
+
+
+def split_pack_to_series(
+    pack: "ContentPack",
+    parts: int = 5,
+    target_seconds: int = 75,
+) -> list[SeriesVideo]:
+    """Split all radio scripts in a ContentPack into series videos.
+
+    Args:
+        pack: ContentPack with radio_scripts.
+        parts: Parts per script.
+        target_seconds: Target duration per part.
+
+    Returns:
+        Flat list of SeriesVideo (all series combined).
+    """
+    all_videos: list[SeriesVideo] = []
+    for script in pack.radio_scripts:
+        videos = split_script_to_series(
+            script,
+            parts=parts,
+            target_seconds=target_seconds,
+            book_title=pack.book_title,
+        )
+        all_videos.extend(videos)
+    return all_videos

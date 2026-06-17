@@ -703,3 +703,495 @@ def transcribe_command(
         console.print("\n" + markdown[:2000])
         if len(markdown) > 2000:
             console.print(f"\n[dim]... ({len(markdown) - 2000} more characters)[/dim]")
+
+
+# ---------------------------------------------------------------------------
+# New MVP-4 commands
+# ---------------------------------------------------------------------------
+
+
+@app.command("affiliate")
+def affiliate_command(
+    action: str = typer.Argument(help="Action: list, add, remove"),
+    config_file: str = typer.Option(
+        "affiliate_links.json", "-c", "--config", help="Path to affiliate config JSON"
+    ),
+    title: str = typer.Option("", "--title", help="Book title (for add/remove)"),
+    shopee: str = typer.Option("", "--shopee", help="Shopee affiliate URL"),
+    tiktok: str = typer.Option("", "--tiktok", help="TikTok Shop affiliate URL"),
+    tiki: str = typer.Option("", "--tiki", help="Tiki affiliate URL"),
+    isbn: str = typer.Option("", "--isbn", help="Book ISBN"),
+) -> None:
+    """Manage affiliate links for books.
+
+    Examples:
+        bookai affiliate list
+        bookai affiliate add --title "Đắc Nhân Tâm" --shopee https://shope.ee/xxx --tiktok https://vt.tiktok.com/xxx
+        bookai affiliate remove --title "Đắc Nhân Tâm"
+    """
+    from .affiliate import AffiliateManager, BookLinks
+
+    mgr = AffiliateManager.from_file(config_file)
+
+    if action == "list":
+        books = mgr.list_books()
+        if not books:
+            console.print("[yellow]No affiliate links configured.[/yellow]")
+            return
+        table = Table(title=f"Affiliate Links ({config_file})")
+        table.add_column("Title", max_width=40)
+        table.add_column("ISBN", width=14)
+        table.add_column("Platforms", width=30)
+        for b in books:
+            table.add_row(b["title"], b["isbn"], ", ".join(b["platforms"]) or "—")
+        console.print(table)
+
+    elif action == "add":
+        if not title:
+            console.print("[red]--title required for add[/red]")
+            raise typer.Exit(1)
+        book = BookLinks(book_title=title, isbn=isbn, shopee=shopee, tiktok=tiktok, tiki=tiki)
+        mgr.add_book(book)
+        mgr.save(config_file)
+        platforms = [p for p in ("shopee", "tiktok", "tiki") if getattr(book, p)]
+        console.print(f"[green]Added: {title} ({', '.join(platforms) or 'no links yet'})[/green]")
+        console.print(f"Saved to: {config_file}")
+
+    elif action == "remove":
+        if not title:
+            console.print("[red]--title required for remove[/red]")
+            raise typer.Exit(1)
+        if mgr.remove_book(title):
+            mgr.save(config_file)
+            console.print(f"[green]Removed: {title}[/green]")
+        else:
+            console.print(f"[yellow]Not found: {title}[/yellow]")
+
+    else:
+        console.print(f"[red]Unknown action: {action}. Use: list, add, remove[/red]")
+        raise typer.Exit(1)
+
+
+@app.command("tts")
+def tts_command(
+    input_json: str = typer.Argument(help="Path to content JSON (from generate/generate-ai)"),
+    output_dir: str = typer.Option("./audio", "-o", "--output", help="Output directory for MP3s"),
+    voice: str = typer.Option(
+        "vi-VN-HoaiMyNeural", "--voice",
+        help="TTS voice: vi-VN-HoaiMyNeural (female) or vi-VN-NamMinhNeural (male)"
+    ),
+    rate: str = typer.Option("+0%", "--rate", help="Speaking rate: +10%, -5%, etc."),
+    max_scripts: int = typer.Option(5, "--max", help="Max scripts to synthesize"),
+) -> None:
+    """Convert radio scripts to Vietnamese voiceover MP3s using Edge TTS.
+
+    Reads content JSON and synthesizes each radio script to audio.
+    Free, no API key required.
+
+    Examples:
+        bookai tts content.json -o ./audio
+        bookai tts content.json --voice vi-VN-NamMinhNeural --rate +10%
+    """
+    from .tts import synthesize_script, list_voices
+
+    path = Path(input_json)
+    if not path.exists():
+        console.print(f"[red]Error: File not found: {input_json}[/red]")
+        raise typer.Exit(1)
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    scripts_data = data.get("radio_scripts", [])
+    if not scripts_data:
+        console.print("[red]No radio_scripts found in input JSON.[/red]")
+        raise typer.Exit(1)
+
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    console.print(
+        f"\n[bold blue]🔊 TTS Synthesis:[/bold blue] "
+        f"{len(scripts_data[:max_scripts])} scripts → {output_dir}"
+    )
+    console.print(f"  Voice: {voice}")
+    console.print(f"  Rate:  {rate}\n")
+
+    # Create simple script-like objects from dicts
+    class _Script:
+        def __init__(self, d: dict) -> None:
+            self.hook = d.get("hook", "")
+            self.body = d.get("body", "")
+            self.cta = d.get("cta", "")
+            self.title = d.get("title", "script")
+
+    results = []
+    for i, sd in enumerate(scripts_data[:max_scripts]):
+        script = _Script(sd)
+        slug = script.title[:30].replace(" ", "_").lower() if script.title else f"script_{i:03d}"
+        out_path = out_dir / f"{i + 1:02d}_{slug}.mp3"
+        console.print(f"  [{i + 1}/{min(len(scripts_data), max_scripts)}] {out_path.name}... ", end="")
+        result = synthesize_script(script, out_path, voice=voice, rate=rate)
+        if result.ok:
+            console.print(f"[green]✓[/green] ({result.duration_seconds:.0f}s)")
+        else:
+            console.print(f"[red]✗ {result.error}[/red]")
+        results.append(result)
+
+    ok = sum(1 for r in results if r.ok)
+    console.print(f"\n[bold green]{ok}/{len(results)} audio files generated in {output_dir}[/bold green]")
+
+
+@app.command("render-video")
+def render_video_command(
+    input_json: str = typer.Argument(help="Path to content JSON (from generate/generate-ai)"),
+    audio_dir: str = typer.Argument(help="Directory containing MP3 voiceovers (from tts command)"),
+    output_dir: str = typer.Option("./videos", "-o", "--output", help="Output directory for MP4s"),
+    cover: str | None = typer.Option(None, "--cover", help="Book cover image path"),
+    resolution: str = typer.Option("1080x1920", "--resolution", help="Video resolution WxH"),
+    max_videos: int = typer.Option(5, "--max", help="Max videos to render"),
+    no_blur: bool = typer.Option(False, "--no-blur", help="Disable background blur"),
+) -> None:
+    """Render TikTok/Reels videos from scripts + voiceovers.
+
+    Combines MP3 audio (from `tts` command) + book cover + text overlays
+    into 1080×1920 MP4 files ready to upload.
+
+    Examples:
+        bookai render-video content.json ./audio -o ./videos --cover cover.jpg
+        bookai render-video content.json ./audio --max 3
+    """
+    from .video_render import render_radio_video, VideoConfig, check_ffmpeg
+
+    if not check_ffmpeg():
+        console.print("[red]FFmpeg not found. Install: sudo apt install ffmpeg[/red]")
+        raise typer.Exit(1)
+
+    path = Path(input_json)
+    if not path.exists():
+        console.print(f"[red]Error: File not found: {input_json}[/red]")
+        raise typer.Exit(1)
+
+    audio_path = Path(audio_dir)
+    if not audio_path.exists():
+        console.print(f"[red]Audio directory not found: {audio_dir}[/red]")
+        raise typer.Exit(1)
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    scripts_data = data.get("radio_scripts", [])
+    audio_files = sorted(audio_path.glob("*.mp3"))
+
+    if not scripts_data:
+        console.print("[red]No radio_scripts found in input JSON.[/red]")
+        raise typer.Exit(1)
+    if not audio_files:
+        console.print(f"[red]No MP3 files found in {audio_dir}[/red]")
+        raise typer.Exit(1)
+
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    cfg = VideoConfig(resolution=resolution, cover_blur=not no_blur)
+
+    class _Script:
+        def __init__(self, d: dict) -> None:
+            self.hook = d.get("hook", "")
+            self.body = d.get("body", "")
+            self.cta = d.get("cta", "")
+            self.title = d.get("title", "video")
+
+    pairs = list(zip(scripts_data[:max_videos], audio_files[:max_videos]))
+    console.print(
+        f"\n[bold blue]🎬 Rendering {len(pairs)} videos:[/bold blue] → {output_dir}\n"
+    )
+
+    for i, (sd, audio_file) in enumerate(pairs):
+        script = _Script(sd)
+        out_path = out_dir / f"{i + 1:02d}_video.mp4"
+        console.print(f"  [{i + 1}/{len(pairs)}] {out_path.name} + {audio_file.name}... ", end="")
+        result = render_radio_video(script, audio_file, out_path, cover_image=cover, config=cfg)
+        if result.ok:
+            console.print(
+                f"[green]✓[/green] ({result.duration_seconds:.0f}s, {result.file_size_mb:.1f}MB)"
+            )
+        else:
+            console.print(f"[red]✗ {result.error[:80]}[/red]")
+
+    console.print(f"\n[bold green]Videos saved to: {output_dir}[/bold green]")
+
+
+@app.command("calendar")
+def calendar_command(
+    input_json: str = typer.Argument(help="Path to content JSON (from generate/generate-ai)"),
+    output: str = typer.Option("calendar.csv", "-o", "--output", help="Output CSV file"),
+    start_date: str = typer.Option("", "--start", help="Start date (YYYY-MM-DD). Default: today"),
+    days: int = typer.Option(30, "--days", help="Number of days to schedule"),
+    platforms: str = typer.Option(
+        "tiktok,instagram", "--platforms",
+        help="Comma-separated platforms: tiktok,instagram,youtube,blog"
+    ),
+    sub_id_prefix: str = typer.Option("", "--sub-id", help="Sub-ID prefix for affiliate tracking"),
+    posts_per_day: int = typer.Option(2, "--posts-per-day", help="Max posts per day"),
+    json_output: bool = typer.Option(False, "--json", help="Also save JSON alongside CSV"),
+) -> None:
+    """Generate a 30-day content posting calendar.
+
+    Turns a ContentPack into a structured posting schedule with:
+    Week 1: Hook & Tease (quotes) → Week 2: Deep Content (radio) →
+    Week 3: Engagement (listicles) → Week 4: Conversion Push (captions)
+
+    Examples:
+        bookai calendar content.json -o calendar.csv --start 2025-08-01
+        bookai calendar content.json --days 14 --platforms tiktok,instagram,youtube
+        bookai calendar content.json --sub-id eckhart_aug --json
+    """
+    from datetime import date as date_type
+    from .calendar import (
+        generate_calendar, save_calendar_csv, save_calendar_json, calendar_summary
+    )
+
+    path = Path(input_json)
+    if not path.exists():
+        console.print(f"[red]Error: File not found: {input_json}[/red]")
+        raise typer.Exit(1)
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+
+    # Re-build a minimal pack-like object from the JSON
+    class _Pack:
+        def __init__(self, d: dict) -> None:
+            from .content_studio import RadioScript, QuoteCard, Listicle, Caption
+
+            self.book_title = d.get("book_title", "")
+
+            def _from_list(cls, items, **kw):
+                result = []
+                for item in items:
+                    try:
+                        result.append(cls(**{k: v for k, v in item.items() if k != "type"}))
+                    except Exception:
+                        pass
+                return result
+
+            self.radio_scripts = [
+                type("RS", (), {"hook": s.get("hook", ""), "body": s.get("body", ""),
+                                "cta": s.get("cta", ""), "title": s.get("title", ""),
+                                "hashtags": s.get("hashtags", [])})()
+                for s in d.get("radio_scripts", [])
+            ]
+            self.quote_cards = [
+                type("QC", (), {"quote_text": s.get("quote_text", ""),
+                                "caption": s.get("caption", ""),
+                                "book_title": s.get("book_title", ""),
+                                "author": s.get("author", ""),
+                                "hashtags": s.get("hashtags", []),
+                                "image_path": s.get("image_path", "")})()
+                for s in d.get("quote_cards", [])
+            ]
+            self.listicles = [
+                type("LS", (), {"title": s.get("title", ""), "items": s.get("items", []),
+                                "intro": s.get("intro", ""), "cta": s.get("cta", ""),
+                                "hashtags": s.get("hashtags", [])})()
+                for s in d.get("listicles", [])
+            ]
+            self.captions = [
+                type("CA", (), {"text": s.get("text", ""), "hashtags": s.get("hashtags", []),
+                                "platform": s.get("platform", "tiktok")})()
+                for s in d.get("captions", [])
+            ]
+
+    pack = _Pack(data)
+    total_content = (
+        len(pack.radio_scripts) + len(pack.quote_cards)
+        + len(pack.listicles) + len(pack.captions)
+    )
+
+    if total_content == 0:
+        console.print("[red]No content found in input JSON. Run `generate` first.[/red]")
+        raise typer.Exit(1)
+
+    start = start_date if start_date else date_type.today().isoformat()
+    platform_list = [p.strip() for p in platforms.split(",") if p.strip()]
+
+    console.print(
+        f"\n[bold blue]📅 Generating {days}-day calendar:[/bold blue] "
+        f"{pack.book_title or 'Unknown book'}"
+    )
+    console.print(f"  Start: {start} | Platforms: {', '.join(platform_list)}")
+    console.print(
+        f"  Content pool: {len(pack.radio_scripts)} radio, {len(pack.quote_cards)} quotes, "
+        f"{len(pack.listicles)} listicles, {len(pack.captions)} captions"
+    )
+
+    entries = generate_calendar(
+        pack,
+        start_date=start,
+        days=days,
+        platforms=platform_list,
+        sub_id_prefix=sub_id_prefix,
+        posts_per_day=posts_per_day,
+    )
+
+    # Save CSV
+    csv_path = save_calendar_csv(entries, output)
+    console.print(f"\n[green]Calendar saved: {csv_path}[/green]")
+
+    # Optionally save JSON
+    if json_output:
+        json_path = Path(output).with_suffix(".json")
+        save_calendar_json(entries, json_path)
+        console.print(f"[green]JSON saved: {json_path}[/green]")
+
+    # Summary table
+    summary = calendar_summary(entries)
+    console.print(f"\n[bold green]📊 Calendar Summary:[/bold green]")
+    console.print(f"  Total posts: {summary['total']}")
+    console.print(f"  Date range: {summary.get('date_range', '—')}")
+
+    if summary.get("by_platform"):
+        console.print("\n  [bold]By platform:[/bold]")
+        for p, n in summary["by_platform"].items():
+            console.print(f"    {p:12s} {n} posts")
+
+    if summary.get("by_week"):
+        console.print("\n  [bold]By week:[/bold]")
+        week_themes = {
+            "week_1": "Hook & Tease",
+            "week_2": "Deep Content",
+            "week_3": "Engagement",
+            "week_4": "Conversion Push",
+        }
+        for w, n in summary["by_week"].items():
+            theme = week_themes.get(w, "")
+            console.print(f"    {w}: {n} posts  [{theme}]")
+
+
+@app.command("blog")
+def blog_command(
+    input_json: str = typer.Argument(help="Path to analysis result JSON (from `process -o`)"),
+    output: str = typer.Option("review.html", "-o", "--output", help="Output file (.html or .md)"),
+    affiliate_link: str = typer.Option("", "--affiliate", help="Primary affiliate URL"),
+    shopee_link: str = typer.Option("", "--shopee", help="Shopee affiliate URL"),
+    tiki_link: str = typer.Option("", "--tiki", help="Tiki affiliate URL"),
+    use_ai: bool = typer.Option(False, "--ai", help="Use LLM to write (needs API key)"),
+    model: str = typer.Option("gpt-4o-mini", "--model", help="Model for AI writing"),
+    api_key: str | None = typer.Option(None, "--api-key", help="API key"),
+    base_url: str | None = typer.Option(None, "--base-url", help="Custom API base URL"),
+) -> None:
+    """Generate an SEO-optimized blog review post from analysis results.
+
+    Creates a 1500-2000 word Vietnamese blog article with:
+    H1/H2 structure, affiliate links, quote sections, schema markup.
+
+    Examples:
+        bookai blog results.json -o review.html --affiliate https://shope.ee/xxx
+        bookai blog results.json --ai --base-url ... --model ... -o review.html
+        bookai blog results.json -o review.md  (Markdown output)
+    """
+    from .blog import generate_blog_post
+
+    path = Path(input_json)
+    if not path.exists():
+        console.print(f"[red]Error: File not found: {input_json}[/red]")
+        raise typer.Exit(1)
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    result = BookResult(**data)
+
+    if not result.analyzed:
+        console.print("[red]No analyzed chunks. Run `process` first.[/red]")
+        raise typer.Exit(1)
+
+    console.print(
+        f"\n[bold blue]✍️ Generating blog post:[/bold blue] {result.metadata.title} "
+        f"({'AI' if use_ai else 'template'})"
+    )
+
+    post = generate_blog_post(
+        result,
+        affiliate_link=affiliate_link,
+        shopee_link=shopee_link,
+        tiki_link=tiki_link,
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        use_ai=use_ai,
+    )
+
+    out_path = Path(output)
+    fmt = "md" if out_path.suffix == ".md" else "html"
+    post.save(out_path, fmt=fmt)
+
+    console.print(f"\n[bold green]✅ Blog post saved: {out_path}[/bold green]")
+    console.print(f"  Title: {post.title}")
+    console.print(f"  Words: ~{post.word_count}")
+    console.print(f"  Sections: {', '.join(post.sections)}")
+    console.print(f"  Meta: {post.meta_description[:80]}...")
+
+
+@app.command("split-series")
+def split_series_command(
+    input_json: str = typer.Argument(help="Path to content JSON (from generate/generate-ai)"),
+    output: str = typer.Option("series.json", "-o", "--output", help="Output JSON file"),
+    parts: int = typer.Option(5, "--parts", help="Number of parts per script (3-7)"),
+    target_seconds: int = typer.Option(75, "--seconds", help="Target seconds per video"),
+) -> None:
+    """Split long radio scripts into a cliffhanger series (5-7 short videos).
+
+    Each video ends with a cliffhanger to drive follow + watch time.
+    Uses the 'Phần tiếp theo còn hay hơn...' formula popularized by @sachhayexpress.
+
+    Examples:
+        bookai split-series content.json -o series.json --parts 5
+        bookai split-series content.json --parts 7 --seconds 60
+    """
+    from .content_studio import split_pack_to_series
+
+    path = Path(input_json)
+    if not path.exists():
+        console.print(f"[red]Error: File not found: {input_json}[/red]")
+        raise typer.Exit(1)
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+
+    # Build minimal pack
+    class _Pack:
+        def __init__(self, d: dict) -> None:
+            from .content_studio import RadioScript
+            self.book_title = d.get("book_title", "")
+            self.radio_scripts = []
+            for s in d.get("radio_scripts", []):
+                try:
+                    self.radio_scripts.append(RadioScript(**{
+                        k: v for k, v in s.items()
+                        if k in ("title", "hook", "body", "cta", "hashtags",
+                                 "estimated_seconds", "source_chunks")
+                    }))
+                except Exception:
+                    pass
+
+    pack = _Pack(data)
+    if not pack.radio_scripts:
+        console.print("[red]No radio_scripts found. Run `generate` first.[/red]")
+        raise typer.Exit(1)
+
+    all_videos = split_pack_to_series(pack, parts=parts, target_seconds=target_seconds)
+
+    console.print(
+        f"\n[bold blue]✂️ Split {len(pack.radio_scripts)} scripts → "
+        f"{len(all_videos)} videos ({parts} parts each)[/bold blue]\n"
+    )
+
+    for v in all_videos:
+        console.print(
+            f"  [{v.series_title[:30]}] Part {v.part_number}/{v.total_parts} "
+            f"~{v.estimated_seconds}s"
+        )
+
+    out_path = Path(output)
+    out_data = {
+        "book_title": pack.book_title,
+        "total_videos": len(all_videos),
+        "parts_per_script": parts,
+        "videos": [v.model_dump() for v in all_videos],
+    }
+    out_path.write_text(json.dumps(out_data, ensure_ascii=False, indent=2), encoding="utf-8")
+    console.print(f"\n[green]Series saved to: {out_path}[/green]")

@@ -17,6 +17,7 @@ dependencies = [
     "Pillow>=10.0",
     "pytesseract>=0.3.10",
     "openai-whisper>=20230918",
+    "edge-tts>=6.1",
 ]
 
 [project.optional-dependencies]
